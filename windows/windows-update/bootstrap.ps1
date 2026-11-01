@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 # Pin the worker to the reviewed Git commit rather than a mutable branch.
-$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/438b9cd5a117fcd72d621f1c9d67a977befe169f/windows/windows-update/MSP-WindowsUpdate.ps1'
+$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/1fabcd2f407496515a743add3e8da068cc637c1e/windows/windows-update/MSP-WindowsUpdate.ps1'
 
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
