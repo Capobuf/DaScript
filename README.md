@@ -10,7 +10,7 @@ Raccolta di script PowerShell per **MSP, sysadmin e assistenza IT su Windows**. 
 
 ## Piattaforme
 
-Gli script sono progettati considerando Windows 10, Windows 11 e Windows Server, incluse varianti Enterprise, LTSC, IoT e Server Core dove applicabile. La compatibilità viene valutata attraverso documentazione Microsoft e controlli delle funzionalità disponibili; eventuali limitazioni specifiche sono riportate nel README dello script.
+Gli script sono progettati considerando Windows 10, Windows 11 e Windows Server dal 2019 con Desktop Experience, incluse varianti Enterprise, LTSC e IoT Enterprise. Server Core è escluso dal supporto. La compatibilità viene valutata attraverso documentazione Microsoft e controlli delle funzionalità disponibili; eventuali limitazioni specifiche sono riportate nel README dello script.
 
 Le operazioni sensibili, in particolare i riavvii dei server, possono richiedere opzioni esplicite.
 
