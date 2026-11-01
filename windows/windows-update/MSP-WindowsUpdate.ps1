@@ -56,6 +56,7 @@ $script:LogNamePrefix = 'Global\MSP-WindowsUpdate-Log-'
 $script:MemoryLog = $null
 $script:MemoryLogRunId = ''
 $script:MemoryLogError = ''
+$script:MonitorBootId = ''
 $script:ControlLockName = 'Global\MSP-WindowsUpdate-Control'
 $script:WorkerLockName = 'Global\MSP-WindowsUpdate-Worker'
 $script:NotificationPath = Join-Path $script:Root 'completion-notified'
@@ -148,6 +149,7 @@ function Initialize-RuntimeState {
         OperationTimeoutMinutes=180; RebootDelaySeconds=90; RebootCommitted=$false
         ActiveOperation=''; OperationBootId=''; ProgressPercent=-1; MonitorEnabled=$false
         OperationStartedUtc=''; OperationProcessId=0; CleanupError=''; ParentCreated=$false
+        WuaProgress=$null
     }
     foreach ($name in $defaults.Keys) {
         if ($null -eq $State.PSObject.Properties[$name]) {
@@ -202,6 +204,16 @@ function Wait-WuaJob {
     $timedOut = $false
     $blocked = $false
     $lastMessage = ''
+    $lastLoggedPercent = -1
+    $lastLoggedUpdatePercent = -1
+    $unchangedLogged = $false
+    $changeFields = @('Index','BatchPercent','UpdatePercent','DownloadPhase','TotalBytesDownloaded','CurrentUpdateBytesDownloaded')
+    $observed = @{}
+    if ($null -ne $State.WuaProgress) {
+        foreach ($name in $changeFields) {
+            if ($null -ne $State.WuaProgress.$name) { $observed[$name] = $State.WuaProgress.$name }
+        }
+    }
     while (-not $Job.IsCompleted) {
         $stopRequested = Test-Path -LiteralPath $script:StopPath
         $deadline = [DateTime]::Parse([string]$State.StartedUtc).ToUniversalTime().AddDays(7)
@@ -222,12 +234,58 @@ function Wait-WuaJob {
         $message = "$Operation in progress."
         $State.ProgressPercent = -1
         if ($Operation -ne 'Scan') {
-            $progress = $Job.GetProgress()
-            $State.ProgressPercent = [int]$progress.PercentComplete
-            $index = [int]$progress.CurrentUpdateIndex
-            $message = "$Operation $($State.ProgressPercent)%"
-            if ($null -ne $Updates -and $index -ge 0 -and $index -lt $Updates.Count) {
-                $message += ': ' + [string]$Updates.Item($index).Title
+            try {
+                $progress = $Job.GetProgress()
+                if ($null -eq $progress) { throw 'WUA returned no progress object.' }
+            } catch {
+                if ($null -eq $State.WuaProgress) { $State.WuaProgress = New-WuaProgress }
+                $State.WuaProgress.ReadError = $_.Exception.Message.Substring(0, [Math]::Min(1024, $_.Exception.Message.Length))
+                Write-Log ("$Operation progress read failed: " + $_.Exception.Message) 'ERROR'
+                throw
+            }
+            $previous = $State.WuaProgress
+            $sample = Get-WuaProgressSample $progress $Updates $Operation
+            $now = [DateTime]::UtcNow
+            $sample.LastResponseUtc = $now.ToString('o')
+            $changed = $false
+            $newUpdate = $null -ne $sample.Index -and (-not $observed.ContainsKey('Index') -or $sample.Index -ne $observed.Index)
+            if ($newUpdate) {
+                foreach ($name in @('UpdatePercent','DownloadPhase','CurrentUpdateBytesDownloaded')) { $observed.Remove($name) }
+            }
+            $newPhase = $null -ne $sample.DownloadPhase -and (-not $observed.ContainsKey('DownloadPhase') -or $sample.DownloadPhase -ne $observed.DownloadPhase)
+            if ($null -ne $previous) {
+                $sample.ObservedUtc = $previous.ObservedUtc
+                $sample.LastChangeUtc = $previous.LastChangeUtc
+            }
+            foreach ($name in $changeFields) {
+                # Compare usable observations across missing samples, never availability itself.
+                if ($null -ne $sample.$name) {
+                    if ($observed.ContainsKey($name) -and $sample.$name -ne $observed[$name]) { $changed = $true }
+                    $observed[$name] = $sample.$name
+                }
+            }
+            $hasValues = $null -ne $sample.Index -or $null -ne $sample.BatchPercent -or $null -ne $sample.TotalBytesDownloaded
+            if (-not $sample.ObservedUtc -and $hasValues) { $sample.ObservedUtc = $sample.LastResponseUtc }
+            if ($changed) { $sample.LastChangeUtc = $sample.LastResponseUtc; $unchangedLogged = $false }
+            $State.WuaProgress = $sample
+            if ($null -ne $sample.BatchPercent) { $State.ProgressPercent = $sample.BatchPercent }
+            if ($newUpdate) {
+                $lastLoggedUpdatePercent = -1
+                Write-Log ("$Operation update $($sample.Index+1)/$($sample.Count): $($sample.Title)")
+            }
+            if ($newPhase) { Write-Log ("Download phase: " + (Get-DownloadPhaseLabel $sample.DownloadPhase)) }
+            if ($null -ne $sample.BatchPercent -and ($lastLoggedPercent -lt 0 -or [Math]::Abs($sample.BatchPercent-$lastLoggedPercent) -ge 10 -or ($sample.BatchPercent -eq 100 -and $lastLoggedPercent -ne 100))) {
+                Write-Log ("$Operation WUA batch: $($sample.BatchPercent)%")
+                $lastLoggedPercent = $sample.BatchPercent
+            }
+            if ($null -ne $sample.UpdatePercent -and ($lastLoggedUpdatePercent -lt 0 -or [Math]::Abs($sample.UpdatePercent-$lastLoggedUpdatePercent) -ge 10 -or ($sample.UpdatePercent -eq 100 -and $lastLoggedUpdatePercent -ne 100))) {
+                Write-Log ("$Operation update $($sample.Index+1)/$($sample.Count): $($sample.UpdatePercent)%")
+                $lastLoggedUpdatePercent = $sample.UpdatePercent
+            }
+            $since = if ($sample.LastChangeUtc) { $sample.LastChangeUtc } else { $sample.ObservedUtc }
+            if ($since -and -not $unchangedLogged -and (Get-MonitorAgeSeconds $since $now) -ge 120) {
+                Write-Log ("$Operation`: NO PROGRESS CHANGE // WINDOWS UPDATE STILL RESPONDING (120s or more).")
+                $unchangedLogged = $true
             }
         }
         if ($blocked) {
@@ -254,8 +312,9 @@ function Invoke-WuaOperation {
     $State.OperationBootId = Get-BootId
     $State.OperationStartedUtc = [DateTime]::UtcNow.ToString('o')
     $State.OperationProcessId = $PID
-    $State.ProgressPercent = -1
+    Reset-WuaProgress $State
     Save-State $State
+    Write-Log ("$Operation operation started.")
     $job = $null
     try {
         switch ($Operation) {
@@ -274,12 +333,82 @@ function Invoke-WuaOperation {
         # Never wait in CleanUp on an incomplete job or clear its recovery marker.
         if ($null -ne $job -and $job.IsCompleted) {
             $State.ActiveOperation = ''
-            $State.ProgressPercent = -1
+            Reset-WuaProgress $State
             Save-State $State
+            Write-Log ("$Operation WUA job completed; finalizing results.")
             $job.CleanUp()
         }
         [GC]::KeepAlive($callback)
     }
+}
+
+function Reset-WuaProgress {
+    param([object]$State)
+    $State.ProgressPercent = -1
+    $State | Add-Member -NotePropertyName WuaProgress -NotePropertyValue $null -Force
+}
+
+function New-WuaProgress {
+    return [pscustomobject]@{
+        Index=$null; Count=0; Title=''; BatchPercent=$null; UpdatePercent=$null; DownloadPhase=$null
+        TotalBytesDownloaded=$null; TotalBytesToDownload=$null
+        CurrentUpdateBytesDownloaded=$null; CurrentUpdateBytesToDownload=$null
+        ObservedUtc=''; LastResponseUtc=''; LastChangeUtc=''; ReadError=''
+    }
+}
+
+function Get-WuaProgressNumber {
+    param([object]$Progress, [string]$Name, [decimal]$Maximum=[decimal]::MaxValue)
+    try {
+        $raw = $Progress.$Name
+        # WUA byte counters use COM DECIMAL, which may retain a fractional scale for whole bytes.
+        if ($raw -is [decimal]) {
+            if ($raw -ge 0 -and $raw -le $Maximum -and [decimal]::Truncate($raw) -eq $raw) { return [decimal]::Truncate($raw) }
+            return $null
+        }
+        $value = [decimal]0
+        if ($null -ne $raw -and [string]$raw -match '^\d+$' -and
+            [decimal]::TryParse([string]$raw, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -and $value -le $Maximum) {
+            return $value
+        }
+    } catch { }
+    return $null
+}
+
+function Get-WuaProgressSample {
+    param([object]$Progress, [object]$Updates, [string]$Operation)
+    $sample = New-WuaProgress
+    $sample.BatchPercent = Get-WuaProgressNumber $Progress 'PercentComplete' 100
+    if ($null -ne $Updates) { $sample.Count = $Updates.Count }
+    $index = Get-WuaProgressNumber $Progress 'CurrentUpdateIndex' ([int]::MaxValue)
+    if ($null -ne $index -and $index -lt $sample.Count) {
+        $sample.Index = [int]$index
+        try { $sample.Title = [string]$Updates.Item([int]$index).Title } catch { }
+        $sample.UpdatePercent = Get-WuaProgressNumber $Progress 'CurrentUpdatePercentComplete' 100
+    }
+    if ($Operation -eq 'Download') {
+        foreach ($name in @('TotalBytesDownloaded','TotalBytesToDownload')) { $sample.$name = Get-WuaProgressNumber $Progress $name }
+        if ($null -ne $sample.Index) {
+            foreach ($name in @('CurrentUpdateBytesDownloaded','CurrentUpdateBytesToDownload')) { $sample.$name = Get-WuaProgressNumber $Progress $name }
+            $phase = Get-WuaProgressNumber $Progress 'CurrentUpdateDownloadPhase' 3
+            if ($null -ne $phase -and $phase -ge 1) { $sample.DownloadPhase = [int]$phase }
+        }
+    }
+    return $sample
+}
+
+function Get-DownloadPhaseLabel {
+    param($Phase)
+    switch ($Phase) { 1 { return 'INITIALIZING' }; 2 { return 'DOWNLOADING' }; 3 { return 'VERIFYING' }; default { return '--' } }
+}
+
+function Get-MonitorAgeSeconds {
+    param([string]$Timestamp, [DateTime]$Now=[DateTime]::UtcNow)
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($Timestamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $null }
+    $seconds = ($Now.ToUniversalTime() - $parsed.UtcDateTime).TotalSeconds
+    if ($seconds -lt 0) { return $null }
+    return [Math]::Floor($seconds)
 }
 
 function Test-UwfEnabled {
@@ -850,7 +979,7 @@ function Invoke-WorkerCore {
             Write-Log ("Previous $($state.ActiveOperation) was not finalized (PID=$($state.OperationProcessId), started=$($state.OperationStartedUtc), boot=$($state.OperationBootId)); new Windows boot confirmed: $bootId. Checking actual update state.") 'WARN'
             $state.ActiveOperation = ''
             $state.OperationBootId = ''
-            $state.ProgressPercent = -1
+            Reset-WuaProgress $state
             Save-State $state
         }
         if (-not $state.RebootCommitted -and (Test-StopRequested $state)) { return }
@@ -1942,6 +2071,26 @@ function New-MonitorWindow {
     <Style x:Key="Technical" TargetType="TextBlock">
       <Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
     </Style>
+    <Style TargetType="Expander">
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Expander">
+        <StackPanel>
+          <ToggleButton IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                        HorizontalAlignment="Left" Foreground="{TemplateBinding Foreground}" Cursor="Hand" AutomationProperties.Name="Diagnostics">
+            <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+              <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="Transparent" Padding="0,2">
+                <StackPanel Orientation="Horizontal"><TextBlock x:Name="Mark" Text="[+] "/><TextBlock Text="DIAGNOSTICS"/></StackPanel>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True"><Setter TargetName="Mark" Property="Text" Value="[-] "/></Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="FocusFrame" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate></ToggleButton.Template>
+          </ToggleButton>
+          <ContentPresenter x:Name="Details" Visibility="Collapsed"/>
+        </StackPanel>
+        <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="Details" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
     <Style TargetType="Button">
       <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Ink}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Rule}"/><Setter Property="BorderThickness" Value="0"/>
@@ -2038,7 +2187,11 @@ function New-MonitorWindow {
         <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Close window"/>
       </Grid>
       <ScrollViewer Grid.Row="1" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <Grid MinHeight="380" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
+        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
+          <Grid.Style><Style TargetType="Grid">
+            <Setter Property="MinHeight" Value="460"/>
+            <Style.Triggers><DataTrigger Binding="{Binding IsExpanded, ElementName=Diagnostics}" Value="True"><Setter Property="MinHeight" Value="560"/></DataTrigger></Style.Triggers>
+          </Style></Grid.Style>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
 
           <WrapPanel Grid.Row="0" Margin="0,2,0,1">
@@ -2047,15 +2200,24 @@ function New-MonitorWindow {
             <TextBlock Text="   [" Foreground="{StaticResource Muted}"/>
             <TextBlock x:Name="StatusText" Text="READING STATUS"/>
             <TextBlock Text="]   " Foreground="{StaticResource Muted}"/>
-            <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
-            <TextBlock Text="  "/>
-            <TextBlock x:Name="ProgressCaption" Text="UNAVAILABLE" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Bottom"/>
+            <Border x:Name="Activity" Background="{StaticResource Accent}" Width="5" Height="5" Margin="0,0,6,0" Visibility="Collapsed" ToolTip="Visual pulse only; see worker and WUA timestamps."/>
+            <TextBlock x:Name="WorkerText" Text="WORKER --" Style="{StaticResource Technical}"/>
           </WrapPanel>
           <StackPanel Grid.Row="1">
+            <TextBlock x:Name="CurrentUpdateText" Text="UPDATE --" TextWrapping="Wrap" MaxHeight="48" TextTrimming="CharacterEllipsis"/>
+            <WrapPanel Margin="0,2,0,0">
+              <TextBlock x:Name="UpdateProgressText" Text="UPDATE --"/>
+              <TextBlock Text="   //   WUA BATCH " Style="{StaticResource Technical}"/>
+              <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
+              <TextBlock Text="  "/>
+              <TextBlock x:Name="ProgressCaption" Text="UNAVAILABLE" Style="{StaticResource Technical}"/>
+            </WrapPanel>
             <Grid Height="5" Width="274" HorizontalAlignment="Left" Margin="13,2,0,3">
-              <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="Update operation progress"/>
-              <Border x:Name="Activity" Background="{StaticResource Accent}" Width="7" HorizontalAlignment="Left" Visibility="Collapsed"/>
+              <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="WUA batch progress"/>
             </Grid>
+            <TextBlock x:Name="TimingText" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
+            <TextBlock x:Name="WuaResponseText" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
+            <TextBlock x:Name="DownloadText" Style="{StaticResource Technical}" TextWrapping="Wrap" Visibility="Collapsed"/>
             <TextBlock x:Name="PhaseDetail" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
             <WrapPanel Margin="0,2,0,2" TextElement.FontSize="12" TextElement.Foreground="{StaticResource Muted}">
               <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
@@ -2079,7 +2241,13 @@ function New-MonitorWindow {
           <ScrollViewer Grid.Row="2" MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
             <TextBlock x:Name="DetailText" Text="Reading status..." TextWrapping="Wrap"/>
           </ScrollViewer>
-          <TextBlock Grid.Row="3" Text="&gt;&gt; Activity // Memory only // Latest 60 lines" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
+          <StackPanel Grid.Row="3">
+            <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" Foreground="{StaticResource Muted}" FontSize="11" IsExpanded="False">
+              <TextBox x:Name="DiagnosticsText" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="80" VerticalScrollBarVisibility="Auto"
+                       Background="Transparent" Foreground="{StaticResource Muted}" BorderThickness="0" SelectionBrush="#8D783B"/>
+            </Expander>
+            <TextBlock Text="&gt;&gt; Activity // Memory only // Latest 60 lines" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
+          </StackPanel>
           <Grid x:Name="TerminalField" Grid.Row="4" ClipToBounds="True" MinHeight="110">
             <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
                    FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
@@ -2159,6 +2327,10 @@ function Update-MonitorAnimation {
     Update-MonitorLog $Window -Immediate:(-not $moving)
     if ($moving) {
         $motion.Index++
+        if ($motion.Index % 8 -eq 0 -and $null -ne $Window.FindName('Activity').Tag) {
+            Update-MonitorTelemetry $Window $Window.FindName('Activity').Tag
+        }
+        $Window.FindName('Activity').Opacity = $(if ($motion.Index % 8 -lt 4) { 0.9 } else { 0.35 })
         $rng = $motion.Random
         # Keep the supplied silhouette intact; only its illumination moves.
         $motion.LightY += $motion.LightSpeed
@@ -2242,6 +2414,104 @@ function Update-MonitorLog {
     }
 }
 
+function Format-MonitorDuration {
+    param($Seconds)
+    if ($null -eq $Seconds) { return '--' }
+    $span = [TimeSpan]::FromSeconds($Seconds)
+    return ('{0:00}:{1:00}:{2:00}' -f [Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)
+}
+
+function Update-MonitorTelemetry {
+    param([object]$Window, [object]$Snapshot, [DateTime]$Now=[DateTime]::UtcNow)
+    $state = $Snapshot.State
+    $sample = $state.WuaProgress
+    $terminal = $state.Status -in $script:TerminalStates
+    $active = [bool]$state.ActiveOperation
+    $previousBoot = $null -ne $Snapshot.PSObject.Properties['PreviousBoot'] -and $Snapshot.PreviousBoot
+    $heartbeatAge = Get-MonitorAgeSeconds $state.UpdatedUtc $Now
+    $workerFresh = $null -ne $heartbeatAge -and $heartbeatAge -lt 30 -and -not $previousBoot
+    $workerLabel = 'LAST HEARTBEAT'
+    if ($active -and -not $previousBoot) {
+        $workerLabel = if ($workerFresh) { 'ACTIVE' } else { 'NO RECENT HEARTBEAT' }
+    }
+    if ($previousBoot) { $workerLabel = 'WAITING FOR RESUME' }
+    $Window.FindName('WorkerText').Text = "WORKER $workerLabel // $(Format-MonitorDuration $heartbeatAge)"
+    $Window.FindName('WorkerText').Foreground = $Window.Resources[$(if ($active -and -not $workerFresh) { 'Warning' } else { 'Muted' })]
+    $Window.FindName('Activity').Visibility = $(if ($active -and $workerFresh -and -not $terminal) { 'Visible' } else { 'Collapsed' })
+    $Window.FindName('Progress').Value = 0
+    $Window.FindName('ProgressText').Text = '--'
+    $Window.FindName('ProgressCaption').Text = 'UNAVAILABLE'
+    $Window.FindName('UpdateProgressText').Text = 'UPDATE --'
+    $Window.FindName('CurrentUpdateText').Text = 'UPDATE --'
+    $Window.FindName('CurrentUpdateText').ToolTip = $null
+    $Window.FindName('TimingText').Text = 'ELAPSED -- // LAST CHANGE --'
+    $Window.FindName('WuaResponseText').Text = 'WUA PROGRESS --'
+    $Window.FindName('WuaResponseText').Foreground = $Window.Resources['Muted']
+    $Window.FindName('DownloadText').Visibility = 'Collapsed'
+    $responseAge = $null
+    $changeAge = $null
+    $changeLabel = 'LAST CHANGE --'
+    $diagnostic = "Worker state / heartbeat UTC: $($state.UpdatedUtc)`r`nOperation: $($state.ActiveOperation) // PID: $($state.OperationProcessId)`r`nOperation start UTC: $($state.OperationStartedUtc)`r`nOperation boot: $($state.OperationBootId)"
+    if ($active -and -not $previousBoot) {
+        $elapsed = Get-MonitorAgeSeconds $state.OperationStartedUtc $Now
+        $response = 'WUA PROGRESS NOT AVAILABLE'
+        if ($null -ne $sample) {
+            $responseAge = Get-MonitorAgeSeconds $sample.LastResponseUtc $Now
+            $changeAge = Get-MonitorAgeSeconds $sample.LastChangeUtc $Now
+            $since = if ($sample.LastChangeUtc) { $sample.LastChangeUtc } else { $sample.ObservedUtc }
+            $unchangedAge = Get-MonitorAgeSeconds $since $Now
+            $changeLabel = if ($sample.LastChangeUtc) { "LAST CHANGE $(Format-MonitorDuration $changeAge) AGO" } else { "UNCHANGED $(Format-MonitorDuration $unchangedAge) // SINCE FIRST SAMPLE" }
+            $fresh = $workerFresh -and $null -ne $responseAge -and $responseAge -lt 30 -and -not $sample.ReadError
+            $response = if ($fresh) {
+                if ($null -ne $unchangedAge -and $unchangedAge -ge 120) { 'NO PROGRESS CHANGE // WINDOWS UPDATE STILL RESPONDING' }
+                elseif ($null -ne $changeAge -and $changeAge -lt 30) { 'PROGRESS CHANGED // WUA RESPONDING' }
+                elseif (-not $sample.ObservedUtc) { 'WUA RESPONDING // PROGRESS UNAVAILABLE' }
+                else { 'WUA RESPONDING // WAITING FOR PROGRESS CHANGE' }
+            } else { 'NO RECENT WUA PROGRESS DATA' }
+            if ($sample.ReadError) { $response = 'WUA PROGRESS READ FAILED // SEE DIAGNOSTICS' }
+            if (-not $fresh) { $Window.FindName('WuaResponseText').Foreground = $Window.Resources['Warning'] }
+            $diagnostic += "`r`nWUA last response UTC: $($sample.LastResponseUtc)`r`nFirst usable sample UTC: $($sample.ObservedUtc)`r`nLast observed change UTC: $($sample.LastChangeUtc)`r`nProgress read error: $($sample.ReadError)"
+            if ($fresh -and -not $terminal -and $state.Phase -in @('Download','Install')) {
+                if ($null -ne $sample.Index -and $sample.Index -ge 0 -and $sample.Index -lt $sample.Count) {
+                    $title = if ($sample.Title) { $sample.Title } else { '--' }
+                    $Window.FindName('CurrentUpdateText').Text = "UPDATE $($sample.Index+1)/$($sample.Count) // $title"
+                    $Window.FindName('CurrentUpdateText').ToolTip = $title
+                    $percent = Get-WuaProgressNumber $sample 'UpdatePercent' 100
+                    if ($null -ne $percent) { $Window.FindName('UpdateProgressText').Text = "UPDATE $percent%" }
+                }
+                $percent = Get-WuaProgressNumber $state 'ProgressPercent' 100
+                if ($null -ne $percent) {
+                    $Window.FindName('Progress').Value = $percent
+                    $Window.FindName('ProgressText').Text = "$percent%"
+                    $Window.FindName('ProgressCaption').Text = 'CURRENT OPERATION'
+                }
+                if ($state.ActiveOperation -eq 'Download') {
+                    $bytes = @{}
+                    foreach ($name in @('TotalBytesDownloaded','TotalBytesToDownload','CurrentUpdateBytesDownloaded','CurrentUpdateBytesToDownload')) {
+                        $value = Get-WuaProgressNumber $sample $name
+                        $bytes[$name] = if ($null -eq $value) { '--' } else { $value.ToString([Globalization.CultureInfo]::InvariantCulture) }
+                    }
+                    $Window.FindName('DownloadText').Text = "$(Get-DownloadPhaseLabel $sample.DownloadPhase) // BATCH $($bytes.TotalBytesDownloaded) / ~$($bytes.TotalBytesToDownload) bytes"
+                    $Window.FindName('DownloadText').Visibility = 'Visible'
+                    $diagnostic += "`r`nCurrent update bytes: $($bytes.CurrentUpdateBytesDownloaded) / ~$($bytes.CurrentUpdateBytesToDownload) (estimated total)"
+                }
+            }
+        }
+        if ($state.Status -eq 'Blocked') { $response = "BLOCKED // $response" }
+        elseif ($state.Phase -eq 'Cancelling') { $response = "CANCELLING // $response" }
+        elseif ($Snapshot.StopRequested) { $response = "STOP REQUESTED // $response" }
+        $Window.FindName('WuaResponseText').Text = $response
+        $Window.FindName('TimingText').Text = "ELAPSED $(Format-MonitorDuration $elapsed) // $changeLabel // WUA REPLY $(Format-MonitorDuration $responseAge) AGO"
+    }
+    if ($previousBoot) { $Window.FindName('WuaResponseText').Text = 'PREVIOUS BOOT DATA // WAITING FOR WORKER' }
+    if ($state.Phase -eq 'RestartCountdown' -and -not $terminal -and $state.Message -match '^Restart in (\d+) seconds\.') {
+        $Window.FindName('ProgressText').Text = $Matches[1] + 's'
+        $Window.FindName('ProgressCaption').Text = 'LAST REPORTED COUNTDOWN'
+    }
+    $box = $Window.FindName('DiagnosticsText')
+    if ($box.Text -cne $diagnostic) { $box.Text = $diagnostic }
+}
+
 function Update-MonitorView {
     param([object]$Window, [object]$Snapshot)
     $state = $Snapshot.State
@@ -2259,7 +2529,7 @@ function Update-MonitorView {
     if ($terminal) { $phase = [string]$state.Status }
     $heading = if ($phases.ContainsKey($phase)) { $phases[$phase] } else { $phase }
     $color = 'Accent'
-    $status = 'ACTIVE'
+    $status = 'RUNNING'
     switch ($state.Status) {
         'Completed' { $color='Success'; $status='COMPLETED' }
         'CompletedWithExclusions' { $color='Warning'; $status='WITH EXCLUSIONS' }
@@ -2285,36 +2555,18 @@ function Update-MonitorView {
     $Window.FindName('FailureCount').Foreground = $Window.Resources[$(if ($failures) { 'Error' } else { 'Ink' })]
     $Window.FindName('SkippedCount').Text = [string]@($state.Skipped).Count
     $Window.FindName('RebootCount').Text = [string]$state.Reboots
-    $bar = $Window.FindName('Progress')
-    $bar.Foreground = $brush
-    $bar.Value = 0
-    $Window.FindName('ProgressText').Text = '--'
+    $Window.FindName('Progress').Foreground = $brush
     $Window.FindName('ProgressText').Foreground = $brush
-    $Window.FindName('ProgressCaption').Text = 'UNAVAILABLE'
-    $Window.FindName('Activity').Visibility = 'Collapsed'
-    # A percentage belongs to the current WUA operation, never to the whole maintenance run.
-    if (-not $terminal -and $state.Phase -in @('Download','Install') -and
-        $null -ne $state.ProgressPercent -and $state.ProgressPercent -ge 0 -and $state.ProgressPercent -le 100) {
-        $bar.Value = $state.ProgressPercent
-        $Window.FindName('ProgressText').Text = "$($state.ProgressPercent)%"
-        $Window.FindName('ProgressCaption').Text = 'IN THIS PHASE'
-    } elseif (-not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')) {
-        $Window.FindName('Activity').Visibility = 'Visible'
-    }
-    if ($state.Phase -eq 'RestartCountdown' -and -not $terminal) {
-        # Display the worker's last reported countdown; do not extrapolate a restart from wall-clock time.
-        if ($state.Message -match '^Restart in (\d+) seconds\.') {
-            $Window.FindName('ProgressText').Text = $Matches[1] + 's'
-            $Window.FindName('ProgressCaption').Text = 'LAST REPORTED'
-        }
-    }
+    $Window.FindName('Activity').Tag = $Snapshot
+    Update-MonitorTelemetry $Window $Snapshot
     $notice = 'Closing this window does not stop updates.'
     if ($Snapshot.StopRequested) { $notice = 'Stop requested. Waiting for the current operation.' }
     if ($state.RebootCommitted) { $notice = 'Restart committed. Cannot be cancelled from this window.' }
     if ($terminal -and $state.ActiveOperation) { $notice = 'WUA may still be active. Check the log.' }
     if ($finished -and -not $state.RebootCommitted) { $notice = 'Result retained until this window closes.' }
     if ($state.CleanupError) { $notice = 'Cleanup incomplete: ' + $state.CleanupError }
-    $updated = [DateTime]::Parse([string]$state.UpdatedUtc).ToLocalTime().ToString('HH:mm:ss')
+    $updated = '--'
+    if ($null -ne (Get-MonitorAgeSeconds $state.UpdatedUtc)) { $updated = [DateTimeOffset]::Parse([string]$state.UpdatedUtc).LocalDateTime.ToString('HH:mm:ss') }
     $Window.FindName('NoticeText').Text = "$notice  Last update: $updated"
     $Window.FindName('NoticeText').Foreground = $Window.Resources[$(if ($state.CleanupError) { 'Error' } else { 'Muted' })]
     $Window.FindName('StopButton').IsEnabled = -not $terminal -and -not $state.RebootCommitted -and -not $Snapshot.StopRequested
@@ -2326,6 +2578,7 @@ function Get-MonitorSnapshot {
     param([string]$RunId, [bool]$RequestStop, [bool]$AcknowledgeFinal)
     $script:MonitorRunId = $RunId
     if ($RequestStop) { Invoke-Stop | Out-Null }
+    if (-not $script:MonitorBootId) { $script:MonitorBootId = Get-BootId }
     $control = Enter-RunLock $script:ControlLockName
     try {
         $state = Get-State
@@ -2333,6 +2586,7 @@ function Get-MonitorSnapshot {
             return [pscustomobject]@{ State=$null; Cleaned=($null -eq $state -and -not (Test-Path -LiteralPath $script:Root)) }
         }
         Initialize-RuntimeState $state
+        $previousBoot = $state.ActiveOperation -and $state.OperationBootId -and $state.OperationBootId -ne $script:MonitorBootId
         $finished = $state.Status -in $script:TerminalStates -and -not $state.ActiveOperation
         Initialize-MemoryLog $RunId -ReadOnly
         $text = Read-MemoryLog
@@ -2342,7 +2596,7 @@ function Get-MonitorSnapshot {
         }
         Send-CompletionSound $state
         if ($finished -and $AcknowledgeFinal) { [IO.File]::WriteAllText($script:ResultReadPath, $RunId) }
-        return [pscustomobject]@{ State=$state; Log=$text; StopRequested=(Test-Path -LiteralPath $script:StopPath); Finished=$finished }
+        return [pscustomobject]@{ State=$state; Log=$text; StopRequested=(Test-Path -LiteralPath $script:StopPath); Finished=$finished; PreviousBoot=[bool]$previousBoot }
     } finally { Exit-RunLock $control }
 }
 
@@ -2350,7 +2604,7 @@ function New-MonitorReader {
     # Only monitor I/O and the existing cooperative stop run here; no update worker is loaded.
     $session = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     foreach ($name in @('Assert-Administrator','Enter-RunLock','Exit-RunLock','Read-JsonState','Get-State',
-        'Initialize-Windows11UpgradeState','Initialize-RuntimeState','Invoke-Stop',
+        'Initialize-Windows11UpgradeState','Initialize-RuntimeState','Invoke-Stop','Get-BootId',
         'Play-CompletionSound','Send-CompletionSound','Get-MonitorSnapshot',
         'Initialize-MemoryLog','Close-MemoryLog','Read-MemoryLog')) {
         $session.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, (Get-Item "Function:$name").Definition))
@@ -2363,6 +2617,7 @@ function New-MonitorReader {
     $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLog', $null, ''))
     $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLogRunId', '', ''))
     $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLogError', '', ''))
+    $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MonitorBootId', '', ''))
     $reader = [PowerShell]::Create($session)
     return $reader
 }
@@ -2423,6 +2678,7 @@ function Invoke-Monitor {
                 }
                 if ($view.Stopping -or $view.RequestStop) { $window.FindName('StopButton').IsEnabled = $false }
             } catch {
+                $window.FindName('Activity').Tag = $null
                 $window.FindName('PhaseText').Text = 'READ / COMMAND FAILED'
                 $window.FindName('PhaseText').Foreground = $window.Resources['Error']
                 $window.FindName('StatusText').Text = 'MONITOR ERROR'
@@ -2434,6 +2690,12 @@ function Invoke-Monitor {
                 $window.FindName('Progress').Value = 0
                 $window.FindName('ProgressText').Text = '--'
                 $window.FindName('ProgressCaption').Text = 'STATUS UNAVAILABLE'
+                $window.FindName('WorkerText').Text = 'WORKER DATA UNAVAILABLE'
+                $window.FindName('WuaResponseText').Text = 'MONITOR READ FAILED // NO CURRENT DATA'
+                $window.FindName('UpdateProgressText').Text = 'UPDATE --'
+                $window.FindName('CurrentUpdateText').Text = 'UPDATE --'
+                $window.FindName('TimingText').Text = 'ELAPSED -- // LAST CHANGE --'
+                $window.FindName('DownloadText').Visibility = 'Collapsed'
                 $view.NextRead = [DateTime]::UtcNow.AddSeconds(3)
             }
         }

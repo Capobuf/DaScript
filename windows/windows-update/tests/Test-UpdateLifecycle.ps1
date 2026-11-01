@@ -96,12 +96,15 @@ function New-TestState {
     return $state
 }
 function New-TestJob {
-    $job = [pscustomobject]@{IsCompleted=$false; Aborts=0; Cleaned=$false; FailProgress=$false}
+    $job = [pscustomobject]@{
+        IsCompleted=$false; Aborts=0; Cleaned=$false; FailProgress=$false
+        Progress=[pscustomobject]@{PercentComplete=42; CurrentUpdateIndex=0; CurrentUpdatePercentComplete=21}
+    }
     $job | Add-Member ScriptMethod RequestAbort { $this.Aborts++ }
     $job | Add-Member ScriptMethod CleanUp { if (-not $this.IsCompleted) { throw 'Unsafe cleanup' }; $this.Cleaned=$true }
     $job | Add-Member ScriptMethod GetProgress {
         if ($this.FailProgress) { throw 'Synthetic progress error' }
-        return [pscustomobject]@{PercentComplete=42; CurrentUpdateIndex=0}
+        return $this.Progress
     }
     return $job
 }
@@ -179,11 +182,14 @@ try {
     $state = New-TestState
     $state.ActiveOperation = 'Scan'
     $state.OperationBootId = 'cimboot:50'
+    $state.WuaProgress = New-WuaProgress
+    $state.WuaProgress.Title = 'Previous boot update'
     Save-State $state
     [IO.File]::WriteAllText($script:StopPath, 'stop')
     Invoke-WorkerCore
     Assert-True ((Get-State).Status -eq 'Stopped' -and -not (Get-State).ActiveOperation) 'Confirmed reboot did not clear the old operation before applying stop.'
     Assert-True ((Read-MemoryLog) -like '*Previous Scan was not finalized*new Windows boot confirmed*') 'Recovery diagnostic omitted the interrupted operation and boot evidence.'
+    Assert-True ($null -eq (Get-State).WuaProgress -and (Get-State).ProgressPercent -eq -1) 'Reboot recovery retained previous progress.'
 
     $platform = [pscustomobject]@{IsWindows11=$true}
     $state = New-TestState
@@ -204,6 +210,89 @@ try {
     $state.Windows11UpgradeOffered = $true
     Complete-UpdateRun $state $platform
     Assert-True ($state.Status -eq 'CompletedWithErrors' -and $state.Windows11UpgradeStatus -eq 'NotCompleted') 'An offered but incomplete upgrade was reported as completed.'
+
+    $updates = [Collections.ArrayList]@([pscustomobject]@{Title='First update'}, [pscustomobject]@{Title='Second update'})
+    $raw = [pscustomobject]@{
+        PercentComplete=42; CurrentUpdateIndex=0; CurrentUpdatePercentComplete=21
+        CurrentUpdateDownloadPhase=2; TotalBytesDownloaded='4294967296'; TotalBytesToDownload='8589934592'
+        CurrentUpdateBytesDownloaded='4096'; CurrentUpdateBytesToDownload='8192'
+    }
+    $sample = Get-WuaProgressSample $raw $updates 'Download'
+    Assert-True ($sample.BatchPercent -eq 42 -and $sample.UpdatePercent -eq 21 -and $sample.Index -eq 0 -and $sample.Count -eq 2 -and $sample.Title -eq 'First update') 'Batch and current update progress were conflated.'
+    Assert-True ($sample.TotalBytesDownloaded -eq 4294967296 -and $sample.TotalBytesToDownload -eq 8589934592 -and $sample.CurrentUpdateBytesDownloaded -eq 4096 -and $sample.DownloadPhase -eq 2) 'Download details or large byte counters were lost.'
+    $raw.TotalBytesDownloaded = [decimal]::Parse('4294967296.00', [Globalization.CultureInfo]::InvariantCulture)
+    $sample = Get-WuaProgressSample $raw $updates 'Download'
+    Assert-True ($sample.TotalBytesDownloaded -eq 4294967296) 'Native COM DECIMAL byte counter was rejected because of its scale.'
+    foreach ($invalid in @($null, '', -1, 101, 'NaN', 'not numeric', 1.5, $true)) {
+        $raw.PercentComplete = $invalid
+        $raw.CurrentUpdatePercentComplete = $invalid
+        $sample = Get-WuaProgressSample $raw $updates 'Install'
+        Assert-True ($null -eq $sample.BatchPercent -and $null -eq $sample.UpdatePercent) 'Invalid percentage became real progress.'
+    }
+    $raw.PercentComplete = 0
+    $raw.CurrentUpdatePercentComplete = 100
+    $sample = Get-WuaProgressSample $raw $updates 'Install'
+    Assert-True ($sample.BatchPercent -eq 0 -and $sample.UpdatePercent -eq 100 -and $null -eq $sample.DownloadPhase -and $null -eq $sample.TotalBytesDownloaded) 'Zero/100 percent or download-to-install reset failed.'
+    $raw.CurrentUpdateIndex = 2
+    $sample = Get-WuaProgressSample $raw $updates 'Download'
+    Assert-True ($null -eq $sample.Index -and $sample.Title -eq '' -and $null -eq $sample.UpdatePercent -and $null -eq $sample.CurrentUpdateBytesDownloaded) 'Invalid index retained previous update data.'
+    $sample = Get-WuaProgressSample ([pscustomobject]@{}) $updates 'Download'
+    Assert-True ($null -eq $sample.BatchPercent -and $null -eq $sample.Index -and $null -eq $sample.DownloadPhase) 'Missing properties fabricated progress.'
+    $unreadable = [pscustomobject]@{}
+    $unreadable | Add-Member ScriptProperty PercentComplete { throw 'Synthetic property getter failure' }
+    $sample = Get-WuaProgressSample $unreadable $updates 'Download'
+    Assert-True ($null -eq $sample.BatchPercent) 'An unreadable individual property fabricated progress.'
+    $raw.CurrentUpdateIndex = 0
+    $raw.CurrentUpdateDownloadPhase = 4
+    $raw.TotalBytesDownloaded = '-1'
+    $sample = Get-WuaProgressSample $raw $updates 'Download'
+    Assert-True ($null -eq $sample.DownloadPhase -and $null -eq $sample.TotalBytesDownloaded) 'Invalid phase or bytes were accepted.'
+
+    $state = New-TestState
+    $script:fakeJob = New-TestJob
+    $script:polls = 0
+    $script:sleepHook = {
+        $script:polls++
+        if ($script:polls -eq 1) {
+            Assert-True ($state.WuaProgress.LastResponseUtc -ne '' -and $state.WuaProgress.LastChangeUtc -eq '') 'First observation falsely claimed an observed change.'
+            $script:fakeJob.Progress.CurrentUpdateIndex = 1
+            $script:fakeJob.Progress.CurrentUpdatePercentComplete = 0
+        } else { $script:fakeJob.IsCompleted = $true }
+    }
+    $null = Wait-WuaJob $state $script:fakeJob 'Install' $updates
+    Assert-True ($state.WuaProgress.Title -eq 'Second update' -and $state.WuaProgress.UpdatePercent -eq 0 -and $state.WuaProgress.LastChangeUtc -ne '') 'Current update transition was lost.'
+    Assert-True ((Read-MemoryLog) -like '*Install update 2/2: Second update*') 'Update transition was not logged.'
+
+    $state = New-TestState
+    $script:fakeJob = New-TestJob
+    $state.WuaProgress = Get-WuaProgressSample $script:fakeJob.Progress $updates 'Install'
+    $state.WuaProgress.ObservedUtc = [DateTime]::UtcNow.AddMinutes(-3).ToString('o')
+    $script:polls = 0
+    $script:sleepHook = { $script:polls++; if ($script:polls -eq 3) { $script:fakeJob.IsCompleted = $true } }
+    $null = Wait-WuaJob $state $script:fakeJob 'Install' $updates
+    Assert-True ($state.WuaProgress.LastChangeUtc -eq '' -and $state.WuaProgress.LastResponseUtc -ne '') 'Unchanged progress was treated as a change or lost WUA response.'
+    Assert-True (@((Read-MemoryLog) -split '\r?\n' | Where-Object { $_ -like '*NO PROGRESS CHANGE*' }).Count -eq 1) 'Unchanged progress flooded the log.'
+    Assert-True ($state.Status -eq 'Running' -and $script:fakeJob.Aborts -eq 0) 'Unchanged progress triggered a new watchdog.'
+
+    $state = New-TestState
+    $script:fakeJob = New-TestJob
+    $script:fakeJob.Progress = [pscustomobject]@{PercentComplete=42; CurrentUpdateIndex=0; CurrentUpdatePercentComplete=21; CurrentUpdateDownloadPhase=1; TotalBytesDownloaded='100'}
+    $script:polls = 0
+    $script:sleepHook = {
+        $script:polls++
+        if ($script:polls -eq 1) {
+            $script:fakeJob.Progress.PercentComplete = $null
+            $script:fakeJob.Progress.CurrentUpdateDownloadPhase = $null
+        } elseif ($script:polls -eq 2) {
+            Assert-True ($state.WuaProgress.LastChangeUtc -eq '' -and $state.ProgressPercent -eq -1) 'Disappearing progress was counted as a change.'
+            $script:fakeJob.Progress.PercentComplete = 43
+            $script:fakeJob.Progress.CurrentUpdateDownloadPhase = 3
+        } else { $script:fakeJob.IsCompleted = $true }
+    }
+    $null = Wait-WuaJob $state $script:fakeJob 'Download' $updates
+    Assert-True ($state.WuaProgress.LastChangeUtc -ne '' -and $state.WuaProgress.DownloadPhase -eq 3) 'Progress after a missing sample was not recognized.'
+    Assert-True ((Read-MemoryLog) -like '*Download phase: INITIALIZING*Download phase: VERIFYING*') 'Observed download phase transitions were not logged.'
+    Assert-True (@((Read-MemoryLog) -split '\r?\n' | Where-Object { $_ -like '*Download WUA batch:*' }).Count -eq 1) 'Minor percentage changes flooded the log.'
 
     $state = New-TestState
     $script:fakeJob = New-TestJob
@@ -227,6 +316,7 @@ try {
     Assert-True ($timedOut -and $state.Status -eq 'Blocked' -and $script:removedTasks -gt $before) 'Unfinished cancellation was not blocked.'
 
     $state = New-TestState
+    $state.WuaProgress = $sample
     $script:fakeJob = New-TestJob
     $script:fakeJob.IsCompleted = $true
     $agent = [pscustomobject]@{}
@@ -234,11 +324,13 @@ try {
     $agent | Add-Member ScriptMethod EndSearch { param($job) return [pscustomobject]@{ResultCode=2} }
     $result = Invoke-WuaOperation $state $agent 'Scan'
     Assert-True ($result.Result.ResultCode -eq 2 -and $script:fakeJob.Cleaned -and -not $state.ActiveOperation) 'Completed asynchronous operation was not finalized.'
+    Assert-True ($null -eq $state.WuaProgress -and $state.ProgressPercent -eq -1) 'Operation completion retained transient progress.'
     $script:fakeJob = New-TestJob
     $script:fakeJob.FailProgress = $true
     $agent | Add-Member ScriptMethod BeginDownload { param($progress,$callback,$context) return $script:fakeJob }
     Assert-Throws { Invoke-WuaOperation $state $agent 'Download' }
     Assert-True ($state.ActiveOperation -eq 'Download' -and -not $script:fakeJob.Cleaned) 'Incomplete operation lost its recovery marker or performed blocking cleanup.'
+    Assert-True ($state.WuaProgress.ReadError -like '*Synthetic progress error*' -and $state.WuaProgress.LastResponseUtc -eq '') 'Failed GetProgress falsely refreshed WUA response or lost its error.'
 
     $state = New-TestState
     $state.Status = 'Completed'

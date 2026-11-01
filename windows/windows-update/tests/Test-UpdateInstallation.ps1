@@ -10,7 +10,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens,
 if ($errors.Count) { throw ($errors | Out-String) }
 $names = @('Get-Candidates','Get-UpdateId','Test-FeatureUpgrade','Add-Skipped',
     'Install-Batch','Invoke-WuaOperation','Wait-WuaJob','Format-HResult',
-    'Get-Failure','Add-Failure','Resolve-Failure')
+    'Get-Failure','Add-Failure','Resolve-Failure','Reset-WuaProgress')
 foreach ($node in $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($node.Name -in $names) { . ([scriptblock]::Create($node.Extent.Text)) }
 }

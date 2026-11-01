@@ -105,6 +105,20 @@ Un secondo task riapre il monitor **al login dello stesso account che ha avviato
 
 Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione per `Completed` e `CompletedWithExclusions`; le esclusioni restano evidenziate nella finestra. Audio disponibile, volume e schema sonoro dipendono dalla sessione. Errori, blocchi e arresti hanno un esito visivo distinto e non producono il suono di successo. `-NoMonitor` disabilita finestra, riapertura al login e suono; è necessario per l'avvio da una sessione di servizio senza desktop.
 
+### Monitoraggio dell'operazione WUA
+
+Il monitor distingue **UPDATE** (percentuale e posizione del singolo aggiornamento, per esempio 3/8) da **WUA BATCH** (percentuale del batch dell'operazione corrente, rappresentata dalla barra). Non esiste una percentuale complessiva della manutenzione. Titolo e posizione provengono dall'indice WUA nella collezione del batch. Durante il download sono disponibili la fase nativa (`INITIALIZING`, `DOWNLOADING`, `VERIFYING`) e i byte del batch; il totale preceduto da `~` è una stima WUA. I byte del singolo aggiornamento sono nella sezione espandibile **DIAGNOSTICS**.
+
+- **WORKER ACTIVE** indica uno stato/heartbeat scritto negli ultimi **30 secondi** (`UpdatedUtc`); **WUA RESPONDING** richiede anche una risposta recente e riuscita di `GetProgress()`. Il piccolo indicatore pulsante è soltanto visivo. Nelle fasi di attesa e a lavoro concluso resta l'ora dell'ultimo heartbeat, senza dichiarare il worker attivo.
+- **PROGRESS CHANGED** indica una variazione osservata negli ultimi 30 secondi di indice, percentuali, fase o byte trasferiti. Dopo **120 secondi** senza variazioni compare `NO PROGRESS CHANGE // WINDOWS UPDATE STILL RESPONDING`, se le risposte continuano. Queste soglie servono solo alla visualizzazione e al log: non terminano operazioni e non modificano i timeout.
+- **NO RECENT HEARTBEAT**, **NO RECENT WUA PROGRESS DATA** e **WUA PROGRESS READ FAILED** distinguono dati vecchi ed errori. Percentuali mancanti, fuori intervallo o obsolete diventano `--`. Ricerca, annullamento, blocco e attesa di riavvio mantengono i propri stati operativi; non viene dedotto un blocco da una percentuale ferma.
+
+I tempi indicano durata dell'operazione, tempo dall'ultima variazione osservata e dall'ultima risposta WUA. Prima della prima variazione si mostra l'intervallo invariato dalla prima osservazione utile. Non sono ETA e non misurano lavoro interno non esposto da Windows. I timer continuano ad aggiornarsi anche mentre il lettore asincrono attende lo stato. **DIAGNOSTICS** mostra timestamp UTC, PID, identificativo del boot ed eventuale errore di lettura, usando solo lo snapshot già acquisito; non interroga WUA né i registri eventi. Al login il lettore controlla una volta il boot tramite CIM, fuori dal lock condiviso, per non mostrare dati del boot precedente come correnti.
+
+Il log in memoria registra inizio/fine operazione, cambio aggiornamento/fase e variazioni di almeno 10 punti percentuali rispetto all'ultimo valore registrato (anche il raggiungimento del 100%). Un periodo invariato produce una sola riga dopo 120 secondi; una nuova variazione riabilita la segnalazione. Il campionamento resta quello esistente, circa ogni 3 secondi: può non osservare transizioni più brevi. Le informazioni temporanee vengono azzerate al cambio operazione, al completamento e al recupero dopo un nuovo boot. Un errore di `GetProgress()` mantiene il precedente percorso di errore e il marcatore dell'operazione incerta.
+
+`IInstallationProgress` espone indice e percentuali, **non una fase interna di installazione, byte, velocità o tempo residuo**. `IDownloadProgress` espone anche fase e byte; percentuali e dimensioni del download sono stime. Una risposta API riuscita conferma la comunicazione, non il progresso effettivo o il successo dell'aggiornamento. Queste interfacce sono documentate da Microsoft per versioni client/server precedenti a quelle già supportate dallo script e non aggiungono requisiti di edizione o dipendenze.
+
 ## Stato e arresto
 
 Il worker si copia in `C:\ProgramData\DaScript\WindowsUpdate\MSP-WindowsUpdate.ps1`. Da PowerShell amministrativa:
@@ -201,6 +215,8 @@ Il controllo UWF include query CIM in sola lettura: verifica gli errori reali di
 
 `Test-UpdateInstallation.ps1` usa oggetti WUA sintetici per verificare il percorso selezione/download/`BeginInstall` con `CanRequestUserInput=true`, successo individuale, diagnostica dell'intervento manuale, batch con esiti misti e risoluzione degli errori dopo un retry riuscito. Non installa aggiornamenti reali.
 
+`Test-UpdateLifecycle.ps1` copre anche percentuali separate, valori assenti/non validi, contatori byte oltre 32 bit, cambio aggiornamento, progresso invariato senza watchdog, errore `GetProgress()` e azzeramento dei dati a fine operazione/dopo reboot. `Test-Monitor.ps1` verifica heartbeat e risposta WUA indipendenti, dati obsoleti, diagnostica espandibile durante l'attesa del lettore e riconoscimento di snapshot appartenenti al boot precedente.
+
 `Test-Monitor.ps1` verifica XAML, controlli WPF, stati sintetici e lettura asincrona su file temporanei, senza elevazione, aggiornamenti, task reali, riavvii o audio. Aggiungere `-Preview` per aprire la UI con dati sintetici; anche il pulsante Stop agisce soltanto sui file temporanei del test. Sono stati verificati su Windows PowerShell 5.1 il rendering della finestra, il ridimensionamento a 640×480, il rendering WPF a 96/192 DPI e gli eventi di stop/chiusura con polling e riepilogo finale. Il rendering a DPI diversi non equivale a un collaudo del cambio monitor o di una sessione RDP.
 
 Casi di collaudo consigliati, su sistemi rappresentativi:
@@ -233,6 +249,10 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 - [Build Windows 11](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information)
 - [Build Windows Server](https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info)
 - [Operazioni WUA asincrone](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/guidelines-for-asynchronous-wua-operations)
+- [IInstallationProgress: indice e percentuali](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nn-wuapi-iinstallationprogress)
+- [IDownloadProgress: percentuali, fase e byte](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nn-wuapi-idownloadprogress)
+- [Contatori byte WUA: tipo COM DECIMAL](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-idownloadprogress-get_totalbytesdownloaded)
+- [Fasi native DownloadPhase](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/ne-wuapi-downloadphase)
 - [Firmware distribuito tramite Windows](https://learn.microsoft.com/en-us/windows-hardware/drivers/bringup/windows-uefi-firmware-update-platform)
 - [Contesti di sicurezza delle attività pianificate](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
 - [Lettura dell'ultimo avvio tramite WMI](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-tasks--desktop-management)

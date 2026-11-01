@@ -48,6 +48,17 @@ $state = [pscustomobject]@{
 Initialize-RuntimeState $state
 $state.ProgressPercent = 42
 $state.ActiveOperation = 'Install'
+$state.OperationStartedUtc = [DateTime]::UtcNow.AddMinutes(-10).ToString('o')
+$state.OperationBootId = Get-BootId
+$state.WuaProgress = New-WuaProgress
+$state.WuaProgress.Index = 2
+$state.WuaProgress.Count = 8
+$state.WuaProgress.Title = 'Windows cumulative update - synthetic preview'
+$state.WuaProgress.UpdatePercent = 21
+$state.WuaProgress.BatchPercent = 42
+$state.WuaProgress.LastResponseUtc = [DateTime]::UtcNow.ToString('o')
+$state.WuaProgress.ObservedUtc = [DateTime]::UtcNow.AddMinutes(-5).ToString('o')
+$state.WuaProgress.LastChangeUtc = [DateTime]::UtcNow.AddMinutes(-3).ToString('o')
 $window = $null
 $reader = $null
 $logOwner = $null
@@ -81,6 +92,47 @@ try {
     Assert-True ($logo.IsFrozen -and $logo.Bounds.Width -eq 1180 -and $logo.Bounds.Height -eq 964) 'Embedded vector logo is missing or invalid.'
     $snapshot = [pscustomobject]@{State=$state; Log='Synthetic log'; StopRequested=$false}
     Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('UpdateProgressText').Text -eq 'UPDATE 21%' -and $window.FindName('CurrentUpdateText').Text -like 'UPDATE 3/8*') 'Current update percentage or batch position is missing.'
+    Assert-True ($window.FindName('WuaResponseText').Text -eq 'NO PROGRESS CHANGE // WINDOWS UPDATE STILL RESPONDING') 'Responsive but unchanged progress was misclassified.'
+    Assert-True ($window.FindName('WorkerText').Text -like 'WORKER ACTIVE*' -and $window.FindName('TimingText').Text -like 'ELAPSED 00:10:*LAST CHANGE 00:03:*') 'Independent heartbeat or operation timers are missing.'
+    Assert-True (-not $window.FindName('Diagnostics').IsExpanded -and $window.FindName('DiagnosticsText').Text -like '*WUA last response UTC:*') 'Diagnostics is not available on demand.'
+    foreach ($invalid in @($null, '', -1, 101, 'NaN', 'bad', 0.5)) {
+        $state.WuaProgress.UpdatePercent = $invalid
+        Update-MonitorView $window $snapshot
+        Assert-True ($window.FindName('UpdateProgressText').Text -eq 'UPDATE --') 'Invalid current update percentage was displayed.'
+    }
+    $state.WuaProgress.UpdatePercent = 21
+    $now = [DateTime]::UtcNow
+    $state.UpdatedUtc = $now.AddSeconds(-40).ToString('o')
+    Update-MonitorTelemetry $window $snapshot $now
+    Assert-True ($window.FindName('WorkerText').Text -like '*NO RECENT HEARTBEAT*' -and $window.FindName('ProgressText').Text -eq '--' -and $window.FindName('Activity').Visibility -eq 'Collapsed') 'Stale heartbeat retained apparent activity or progress.'
+    $state.UpdatedUtc = $now.ToString('o')
+    $state.WuaProgress.LastResponseUtc = $now.AddSeconds(-40).ToString('o')
+    Update-MonitorTelemetry $window $snapshot $now
+    Assert-True ($window.FindName('WorkerText').Text -like '*ACTIVE*' -and $window.FindName('WuaResponseText').Text -eq 'NO RECENT WUA PROGRESS DATA' -and $window.FindName('ProgressText').Text -eq '--') 'Worker heartbeat was mistaken for a WUA reply.'
+    $state.WuaProgress.LastResponseUtc = $now.ToString('o')
+    $state.WuaProgress.ReadError = 'Synthetic progress read failed'
+    Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('WuaResponseText').Text -like '*READ FAILED*' -and $window.FindName('DiagnosticsText').Text -like '*Synthetic progress read failed*' -and $window.FindName('ProgressText').Text -eq '--') 'Progress read error retained valid-looking values.'
+    $state.WuaProgress.ReadError = ''
+    $snapshot | Add-Member NoteProperty PreviousBoot $true
+    Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('CurrentUpdateText').Text -eq 'UPDATE --' -and $window.FindName('WuaResponseText').Text -like '*PREVIOUS BOOT DATA*') 'Previous boot progress was displayed as current.'
+    $snapshot.PreviousBoot = $false
+    $state.WuaProgress.LastChangeUtc = $now.ToString('o')
+    Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('WuaResponseText').Text -like 'PROGRESS CHANGED*') 'Actual progress change was not distinguished.'
+    $state.ActiveOperation = 'Download'
+    $state.Phase = 'Download'
+    $state.WuaProgress.DownloadPhase = 3
+    $state.WuaProgress.TotalBytesDownloaded = 4096
+    $state.WuaProgress.TotalBytesToDownload = 8192
+    Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('DownloadText').Text -eq 'VERIFYING // BATCH 4096 / ~8192 bytes') 'Download phase or estimated bytes are missing.'
+    $state.ActiveOperation = 'Install'
+    $state.Phase = 'Install'
+    Update-MonitorView $window $snapshot
+    Assert-True ($window.FindName('DownloadText').Visibility -eq 'Collapsed') 'Install displayed previous download details.'
     $index = $signal.Tag.Index
     Update-MonitorAnimation $window
     Assert-True ($signal.Tag.Index -eq $index+1 -and $window.FindName('NoiseText').Text.Length -gt 0) 'Terminal animation did not advance.'
@@ -179,6 +231,17 @@ try {
     try {
         $pending = $reader.BeginInvoke()
         Assert-True (-not $pending.AsyncWaitHandle.WaitOne(200)) 'Snapshot bypassed the control lock.'
+        $window.FindName('Diagnostics').IsExpanded = $true
+        $before = $signal.Tag.Index
+        $frame = [Windows.Threading.DispatcherFrame]::new()
+        $pulse = [Windows.Threading.DispatcherTimer]::new()
+        $pulse.Interval = [TimeSpan]::FromMilliseconds(30)
+        $pulse.add_Tick({
+            Update-MonitorAnimation $window
+            if ($signal.Tag.Index -ge $before+3) { $pulse.Stop(); $frame.Continue = $false }
+        })
+        try { $pulse.Start(); [Windows.Threading.Dispatcher]::PushFrame($frame) } finally { $pulse.Stop() }
+        Assert-True ($window.FindName('Diagnostics').IsExpanded -and $signal.Tag.Index -eq $before+3 -and -not $pending.IsCompleted) 'Diagnostics or dispatcher animation blocked on the reader.'
         $window.FindName('NoticeText').Text = 'UI remains available while the reader waits.'
         Assert-True ($window.FindName('NoticeText').Text -like 'UI remains*') 'Background lock blocked access to UI controls.'
     } finally { Exit-RunLock $guard }
@@ -208,6 +271,7 @@ try {
     $state.ActiveOperation = 'Install'
     $state.Message = 'Install 42%: Windows cumulative update - synthetic preview'
     $state.ProgressPercent = 42
+    $state.WuaProgress.LastResponseUtc = [DateTime]::UtcNow.ToString('o')
     $state.Failures = @()
     $state.Skipped = @()
     Save-State $state
@@ -216,6 +280,15 @@ try {
     $stopped = @($reader.Invoke())[-1]
     if ($reader.HadErrors) { throw ($reader.Streams.Error | Out-String) }
     Assert-True ($stopped.StopRequested -and (Get-State).Status -eq 'Running') 'UI stop changed worker state.'
+    $state.OperationBootId = 'cimboot:1'
+    Save-State $state
+    $reader.Commands.Clear()
+    [void]$reader.AddCommand('Get-MonitorSnapshot').AddParameter('RunId',$state.RunId)
+    $oldBoot = @($reader.Invoke())[-1]
+    if ($reader.HadErrors) { throw ($reader.Streams.Error | Out-String) }
+    Assert-True $oldBoot.PreviousBoot 'Background reader accepted progress from a previous boot.'
+    $state.OperationBootId = Get-BootId
+    Save-State $state
     [IO.File]::Delete($script:StopPath)
     $reader.Commands.Clear()
     [void]$reader.AddCommand('Close-MemoryLog')
