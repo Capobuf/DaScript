@@ -1,6 +1,10 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$Preview)
+param(
+    [switch]$Preview,
+    [ValidateSet('Running','NoUpdates','Completed','Partial','Error','Reboot','Stopped')]
+    [string]$PreviewOutcome = 'Running'
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Run this test with powershell.exe -STA.' }
@@ -21,6 +25,248 @@ function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
     $script:checks++
+}
+function Wait-MonitorTransition {
+    param($Window)
+    $frame = [Windows.Threading.DispatcherFrame]::new()
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    $pulse = [Windows.Threading.DispatcherTimer]::new()
+    $pulse.Interval = [TimeSpan]::FromMilliseconds(20)
+    $pulse.add_Tick({
+        if ($null -eq $Window.Tag.Storyboard -or $deadline.Elapsed.TotalSeconds -gt 5) {
+            $pulse.Stop()
+            $frame.Continue = $false
+        }
+    })
+    try { $pulse.Start(); [Windows.Threading.Dispatcher]::PushFrame($frame) } finally { $pulse.Stop() }
+    Assert-True ($null -eq $Window.Tag.Storyboard) 'Transition did not complete within five seconds.'
+}
+function Test-MonitorTransitions {
+    param($Window, $State, $Snapshot)
+    $State.ActiveOperation = ''
+    $State.RebootCommitted = $false
+    $State.Failures = @()
+    $State.Skipped = @()
+    $State.Installed = @()
+    $Snapshot.StopRequested = $false
+    $cases = @{
+        Completed='NoUpdates'; CompletedWithExclusions='Partial'; CompletedWithErrors='Error'
+        Blocked='Error'; Stopped='Stopped'; WaitingForReboot='Reboot'; Running=''
+    }
+    foreach ($status in $cases.Keys) {
+        $State.Status = $status
+        Update-MonitorView $Window $Snapshot
+        Assert-True ($Window.Tag.Outcome -eq $cases[$status]) "Wrong outcome for $status."
+    }
+    $State.Status = 'Completed'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.FindName('OutcomeDescription').Text -eq 'Nessun aggiornamento trovato.' -and [Windows.Automation.AutomationProperties]::GetName($Window.FindName('OutcomeTitle')) -eq 'GIRO A VUOTO') 'Empty scan did not use the concise title and factual summary.'
+    $State.Installed = @([pscustomobject]@{Title='Synthetic successful update'})
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Outcome -eq 'Completed') 'Real installed count was ignored.'
+    $State.Status = 'CompletedWithErrors'
+    $State.Failures = @([pscustomobject]@{Title='Synthetic failure'; Reason='Result=4; HRESULT=0x8024200A'; Resolved=$false})
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Outcome -eq 'Partial' -and $Window.FindName('OutcomeCounts').Text -like '*Errori: 1*') 'Mixed results were presented as success.'
+    $State.Status = 'Blocked'
+    $State.Message = 'Synthetic search failure: ResultCode=4'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Outcome -eq 'Error' -and $Window.FindName('OutcomeDetail').Text -eq $State.Message) 'Scan failure lost its diagnostic detail.'
+    $State.ActiveOperation = 'Scan'
+    Update-MonitorView $Window $Snapshot
+    Assert-True (-not $Window.Tag.Outcome -and $Window.FindName('OperationalView').Visibility -eq 'Visible') 'Uncertain WUA operation was presented as finished.'
+    $State.ActiveOperation = ''
+    $State.Status = 'WaitingForReboot'
+    $State.Phase = 'RestartCountdown'
+    $State.Message = 'Restart in 75 seconds. Save your work.'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Outcome -eq 'Reboot' -and $Window.FindName('OutcomeDescription').Text -like '*75 s*' -and $Window.FindName('StopButton').IsEnabled) 'Reboot screen lost real countdown or cooperative stop.'
+    $State.RebootCommitted = $true
+    Update-MonitorView $Window $Snapshot
+    Assert-True (-not $Window.FindName('StopButton').IsEnabled -and $Window.FindName('OutcomeDescription').Text -like '*non annullabile*') 'Committed reboot offered cancellation.'
+    $State.Status = 'Running'
+    $State.Phase = 'Resume'
+    $State.RebootCommitted = $false
+    Update-MonitorView $Window $Snapshot
+    Assert-True (-not $Window.Tag.Outcome -and $Window.FindName('OutcomeView').Visibility -eq 'Collapsed') 'Resume retained the reboot result.'
+    $Snapshot.StopRequested = $true
+    Update-MonitorView $Window $Snapshot
+    Assert-True (-not $Window.Tag.Outcome) 'Stop request was confused with completed cancellation.'
+    $State.Status = 'Stopped'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Outcome -eq 'Stopped') 'Confirmed cancellation was lost.'
+    $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+    Assert-True ($Window.Tag.ShowLog -and $Window.FindName('OperationalView').Visibility -eq 'Visible') 'Final log action did not open the existing log.'
+    $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+    Assert-True (-not $Window.Tag.ShowLog -and $Window.FindName('OutcomeView').Visibility -eq 'Visible') 'Cannot return from log to result.'
+
+    # Native WPF rendering/clock tests with synthetic state; no worker or WUA execution.
+    $Window.Tag.Motion = $false
+    $Window.Show()
+    $Window.UpdateLayout()
+    Assert-True ($Window.FindName('IntroLayer').Visibility -eq 'Collapsed' -and $Window.FindName('Scene').Opacity -eq 1) 'Static fallback hid the view.'
+    Assert-True ($Window.AllowsTransparency -and $Window.Background.Color.A -eq 0 -and $Window.FindName('WindowSurface').Background.Color.A -eq 255) 'Static fallback lost its opaque operational surface.'
+    foreach ($name in @('GhostAttack')) {
+        $storyboard = $Window.Resources[$name]
+        $storyboard.Begin($Window, $true)
+        $Window.Tag.Storyboard = $storyboard
+        $storyboard.Pause($Window)
+        $storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(450), 'BeginTime')
+        $Window.Width = 640
+        $Window.Height = 480
+        $Window.UpdateLayout()
+        if ($name -eq 'GhostAttack') {
+            Assert-True ($Window.FindName('IntroLayer').Visibility -eq 'Visible' -and $Window.FindName('IntroScale').ScaleX -gt 0.015 -and $Window.FindName('IntroScale').ScaleX -lt 0.56) "Native attack clock: visibility=$($Window.FindName('IntroLayer').Visibility); scale=$($Window.FindName('IntroScale').ScaleX); time=$($storyboard.GetCurrentTime($Window))."
+            $storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::Zero, 'BeginTime')
+            Assert-True ($Window.FindName('IntroScale').ScaleX -eq 0.015) 'Intro does not start with a tiny logo.'
+            $storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(1010), 'BeginTime')
+            Assert-True ($Window.FindName('IntroScale').ScaleX -gt 1 -and $Window.FindName('WindowSurface').Opacity -eq 0) 'App was revealed before the masking flash.'
+            $storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(1050), 'BeginTime')
+            Assert-True ($Window.FindName('Impact').Opacity -eq 1 -and $Window.FindName('WindowSurface').Opacity -eq 1 -and $Window.FindName('IntroGhost').Opacity -eq 0) 'Flash did not fully cover the window reveal.'
+        }
+        $storyboard.Resume($Window)
+        $storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromSeconds(4), 'BeginTime')
+        Assert-True ($null -eq $Window.Tag.Storyboard -and $Window.FindName('IntroLayer').Visibility -eq 'Collapsed' -and $Window.FindName('Scene').Opacity -eq 1) 'A finite animation left the UI hidden or kept running.'
+        Stop-MonitorTransition $Window
+    }
+    $Window.Tag.Motion = $true
+    Start-MonitorTransition $Window 'GhostAttack'
+    $enabled = [Windows.SystemParameters]::ClientAreaAnimation -and -not [Windows.SystemParameters]::HighContrast -and ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
+    Assert-True (($null -ne $Window.Tag.Storyboard) -eq $enabled) 'Animation capability selection failed.'
+    if ($enabled) {
+        $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(450), 'BeginTime')
+        $Window.UpdateLayout()
+        Assert-True ($Window.WindowState -eq 'Maximized' -and $Window.ResizeMode -eq 'NoResize' -and $null -eq [Windows.Shell.WindowChrome]::GetWindowChrome($Window)) 'Transition did not enter native fullscreen.'
+        Assert-True ($Window.FindName('IntroLayer').ActualHeight -eq $Window.ActualHeight -and -not $Window.FindName('WindowSurface').IsHitTestVisible) 'Intro does not cover the screen or allows interaction during transition.'
+        Add-Type -AssemblyName System.Windows.Forms
+        $screen = [Windows.Forms.Screen]::FromHandle([Windows.Interop.WindowInteropHelper]::new($Window).Handle).Bounds
+        $origin = $Window.PointToScreen([Windows.Point]::new(0,0))
+        $corner = $Window.PointToScreen([Windows.Point]::new($Window.ActualWidth,$Window.ActualHeight))
+        Assert-True ([Math]::Abs($origin.X-$screen.Left) -le 1 -and [Math]::Abs($origin.Y-$screen.Top) -le 1 -and [Math]::Abs($corner.X-$screen.Right) -le 1 -and [Math]::Abs($corner.Y-$screen.Bottom) -le 1) 'Fullscreen does not cover the current monitor including the taskbar.'
+    }
+    $Window.WindowState = 'Minimized'
+    Assert-True ($null -eq $Window.Tag.Storyboard -and $Window.WindowState -eq 'Minimized') 'Minimize left transition clocks attached or restored focus.'
+    $Window.WindowState = 'Normal'
+    Stop-MonitorTransition $Window
+    if ($enabled) {
+        $bounds = $Window.RestoreBounds
+        foreach ($name in @('GhostAttack')) {
+            $appOrigin = $Window.PointToScreen([Windows.Point]::new(0,0))
+            Start-MonitorTransition $Window $name
+            $Window.Tag.Storyboard.Pause($Window)
+            Assert-True ($null -ne $Window.Tag.WindowPlacement) "$name did not save the original placement."
+            $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(450), 'BeginTime')
+            if ($name -eq 'GhostAttack') {
+                $State.Status = 'Blocked'
+                Update-MonitorView $Window $Snapshot
+            }
+            $Window.UpdateLayout()
+            $target = [Windows.PresentationSource]::FromVisual($Window).CompositionTarget
+            Assert-True ($target.UsesPerPixelOpacity -and $target.BackgroundColor.A -eq 0) "$name has an opaque native backdrop: $($target.BackgroundColor)."
+            $render = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$Window.ActualWidth, [int]$Window.ActualHeight, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+            $render.Render($Window)
+            $pixel = [byte[]]::new(4)
+            $render.CopyPixels([Windows.Int32Rect]::new(2,2,1,1), $pixel, 4, 0)
+            Assert-True ($pixel[0] -eq 0 -and $pixel[1] -eq 0 -and $pixel[2] -eq 0 -and $pixel[3] -eq 235) "$name did not render the dark translucent vignette corners."
+            $vignette = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$Window.ActualWidth, [int]$Window.ActualHeight, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+            $vignette.Render($Window.FindName('DimLayer'))
+            $center = [byte[]]::new(4)
+            $vignette.CopyPixels([Windows.Int32Rect]::new([int]($Window.ActualWidth/2),[int]($Window.ActualHeight/2),1,1), $center, 4, 0)
+            Assert-True ($center[0] -eq 0 -and $center[1] -eq 0 -and $center[2] -eq 0 -and $center[3] -ge 102 -and $center[3] -le 104) "$name vignette center is not substantially clearer than its edges."
+            Assert-True ($Window.Opacity -eq 1 -and $Window.FindName('IntroGhost').Opacity -eq 1) "$name faded the window or ghost instead of the backdrop."
+            if ($name -eq 'GhostAttack') {
+                $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromSeconds(0.95), 'BeginTime')
+                $surface = $Window.FindName('WindowSurface')
+                $surfaceOrigin = $surface.PointToScreen([Windows.Point]::new(0,0))
+                Assert-True ($surface.Opacity -eq 0 -and $surface.Width -eq $bounds.Width -and $surface.Height -eq $bounds.Height) 'App is not hidden at its original size before the flash.'
+                Assert-True ([Math]::Abs($surfaceOrigin.X-$appOrigin.X) -le 1 -and [Math]::Abs($surfaceOrigin.Y-$appOrigin.Y) -le 1) 'App moved on the desktop during its reveal.'
+                $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(750), 'BeginTime')
+                $logo = $Window.FindName('IntroGhost')
+                $readableBounds = $logo.TransformToAncestor($Window).TransformBounds([Windows.Rect]::new(0,0,$logo.ActualWidth,$logo.ActualHeight))
+                Assert-True ([Windows.Rect]::new(0,0,$Window.ActualWidth,$Window.ActualHeight).Contains($readableBounds) -and $logo.Opacity -eq 1 -and $Window.FindName('Impact').Opacity -eq 0) 'The impact logo was cropped or covered before it could be recognized.'
+                $readableScale = $Window.FindName('IntroScale').ScaleX
+                $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(780), 'BeginTime')
+                Assert-True ($Window.FindName('IntroScale').ScaleX -gt $readableScale) 'The approach stopped before the final close-up.'
+                $Window.Tag.Storyboard.SeekAlignedToLastTick($Window, [TimeSpan]::FromSeconds(1.01), 'BeginTime')
+                $ghost = $Window.FindName('IntroGhost')
+                $ghostBounds = $ghost.TransformToAncestor($Window).TransformBounds([Windows.Rect]::new(0,0,$ghost.ActualWidth,$ghost.ActualHeight))
+                Assert-True ($ghostBounds.Contains([Windows.Rect]::new(0,0,$Window.ActualWidth,$Window.ActualHeight)) -and $Window.FindName('IntroLayer').Opacity -eq 1) 'Ghost does not grow beyond the screen bounds before the flash.'
+                $face = $ghost.TransformToAncestor($Window).Transform([Windows.Point]::new(300,492*0.31))
+                Assert-True ([Math]::Abs($face.X-$Window.ActualWidth/2) -lt 2 -and [Math]::Abs($face.Y-$Window.ActualHeight/2) -lt $Window.ActualHeight*0.02) "Face=$face; screen=$($Window.ActualWidth)x$($Window.ActualHeight); focus=$($Window.FindName('IntroFocus').Y); scale=$($Window.FindName('IntroScale').ScaleX)."
+            }
+            $Window.Tag.Storyboard.Resume($Window)
+            Wait-MonitorTransition $Window
+            Assert-True ($null -eq $Window.Tag.WindowPlacement -and $Window.WindowState -eq 'Normal' -and $Window.ResizeMode -eq 'CanResize') "$name did not restore the window at real timeline completion: state=$($Window.WindowState); resize=$($Window.ResizeMode); saved=$($Window.Tag.WindowPlacement)."
+            Assert-True ([Math]::Abs($Window.Left-$bounds.Left) -lt 1 -and [Math]::Abs($Window.Top-$bounds.Top) -lt 1 -and [Math]::Abs($Window.Width-$bounds.Width) -lt 1 -and [Math]::Abs($Window.Height-$bounds.Height) -lt 1) "$name lost the original position or dimensions."
+            Assert-True ($Window.FindName('ChromeControls').Visibility -eq 'Visible' -and $null -ne [Windows.Shell.WindowChrome]::GetWindowChrome($Window)) "$name did not restore native window controls."
+            Assert-True ($Window.FindName('WindowSurface').Background -eq $Window.Tag.SceneBackground -and $Window.FindName('WindowSurface').Background.Color.A -eq 255) "$name did not restore the latest outcome background."
+            Assert-True ($Window.FindName('DimLayer').Visibility -eq 'Collapsed' -and [double]::IsNaN($Window.FindName('WindowSurface').Width) -and $Window.FindName('WindowSurface').Opacity -eq 1) "$name left a vignette or fixed-size/faded app after completion."
+        }
+        $Window.WindowState = 'Maximized'
+        Start-MonitorTransition $Window 'GhostAttack'
+        $Window.Tag.Storyboard.SkipToFill($Window)
+        Wait-MonitorTransition $Window
+        Assert-True ($Window.WindowState -eq 'Maximized' -and $null -eq $Window.Tag.WindowPlacement) 'Originally maximized window was not restored.'
+        $Window.WindowState = 'Normal'
+        Assert-True ([Math]::Abs($Window.Width-$bounds.Width) -lt 1 -and [Math]::Abs($Window.Left-$bounds.Left) -lt 1) 'Fullscreen corrupted the maximized window restore bounds.'
+        Start-MonitorTransition $Window 'GhostAttack'
+        $escape = [Windows.Input.KeyEventArgs]::new([Windows.Input.Keyboard]::PrimaryDevice, [Windows.PresentationSource]::FromVisual($Window), 0, [Windows.Input.Key]::Escape)
+        $escape.RoutedEvent = [Windows.Input.Keyboard]::PreviewKeyDownEvent
+        $Window.RaiseEvent($escape)
+        Assert-True ($escape.Handled -and $null -eq $Window.Tag.WindowPlacement -and $Window.WindowState -eq 'Normal') 'Escape did not restore the window.'
+        Start-MonitorTransition $Window 'GhostAttack'
+        $Window.WindowState = 'Minimized'
+        $Window.WindowState = 'Maximized'
+        Assert-True ($Window.WindowState -eq 'Normal' -and $null -eq $Window.Tag.WindowPlacement) 'Restoring a minimized fullscreen animation retained fullscreen.'
+    }
+    $intro = $Window.Resources['GhostAttack']
+    $intro.Begin($Window, $true)
+    $Window.Tag.Storyboard = $intro
+    $intro.SeekAlignedToLastTick($Window, [TimeSpan]::FromMilliseconds(1000), 'BeginTime')
+    $State.Status = 'Completed'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($Window.Tag.Storyboard -eq $intro -and $Window.Tag.Outcome -eq 'Completed') 'An early worker result interrupted or restarted the intro.'
+    Stop-MonitorTransition $Window
+    $State.Status = 'Completed'
+    Update-MonitorView $Window $Snapshot
+    Assert-True ($null -eq $Window.Tag.Storyboard -and $null -eq $Window.Tag.WindowPlacement -and $Window.WindowState -eq 'Normal') 'Completion replayed the fullscreen intro.'
+    Assert-True ($Window.FindName('FooterActions').HorizontalAlignment -eq 'Center' -and $Window.FindName('NoticeText').Visibility -eq 'Collapsed' -and $Window.FindName('OutcomeDetail').Visibility -eq 'Collapsed') 'Result footer or verbose detail was not simplified.'
+    if ($enabled) {
+        Assert-True ($Window.Tag.Pulse -and $Window.Tag.SceneBackground.HasAnimatedProperties) 'Result color alternation did not start.'
+        $background = $Window.Tag.SceneBackground
+        $ink = $Window.FindName('OutcomeTitle').Fill
+        $originalInk = $ink.Color
+        $frame = [Windows.Threading.DispatcherFrame]::new()
+        $pulse = [Windows.Threading.DispatcherTimer]::new()
+        $pulse.Interval = [TimeSpan]::FromMilliseconds(1000)
+        $pulse.add_Tick({ $pulse.Stop(); $frame.Continue = $false })
+        try { $pulse.Start(); [Windows.Threading.Dispatcher]::PushFrame($frame) } finally { $pulse.Stop() }
+        Assert-True ($background.Color -eq $Window.Tag.AlternateColor -and $Window.FindName('WindowSurface').Background -eq $background) 'Native color clock did not alternate the result background.'
+        Assert-True (-not $ink.HasAnimatedProperties -and $ink.Color -eq $originalInk -and $Window.FindName('OutcomeGhost').Fill -eq $ink) 'Background pulse also changed the logo or title.'
+        $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+        Assert-True (-not $Window.Tag.Pulse -and -not $background.HasAnimatedProperties) 'Result colors kept animating while reading the log.'
+        $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+        Assert-True $Window.Tag.Pulse 'Returning to the result did not resume its colors.'
+        $Window.WindowState = 'Minimized'
+        Assert-True (-not $Window.Tag.Pulse) 'Minimized window retained its color animation.'
+        $Window.WindowState = 'Normal'
+        Assert-True $Window.Tag.Pulse 'Restoring the result did not resume its colors.'
+        $Window.Tag.Motion = $false
+        Set-MonitorOutcomePulse $Window
+        Assert-True (-not $Window.Tag.Pulse) 'Static fallback retained blinking.'
+        $Window.Tag.Motion = $true
+    }
+    foreach ($dpi in @(96,192)) {
+        foreach ($status in @('Completed','CompletedWithExclusions','CompletedWithErrors','Blocked','WaitingForReboot','Stopped')) {
+            $State.Status = $status
+            Update-MonitorView $Window $Snapshot
+            Stop-MonitorTransition $Window
+            $Window.UpdateLayout()
+            $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new(640*$dpi/96, 480*$dpi/96, $dpi, $dpi, [Windows.Media.PixelFormats]::Pbgra32)
+            $bitmap.Render($Window)
+            Assert-True ($Window.FindName('OutcomeTitle').ActualWidth -gt 0 -and $Window.FindName('OutcomeTitle').Data.IsFrozen) "Pixel title did not render for $status at $dpi DPI."
+        }
+    }
 }
 $testBase = Join-Path ([IO.Path]::GetTempPath()) ('DaScript-monitor-tests-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($testBase)
@@ -135,21 +381,12 @@ try {
     Assert-True ($window.FindName('DownloadText').Visibility -eq 'Collapsed') 'Install displayed previous download details.'
     $index = $signal.Tag.Index
     Update-MonitorAnimation $window
-    Assert-True ($signal.Tag.Index -eq $index+1 -and $window.FindName('NoiseText').Text.Length -gt 0) 'Terminal animation did not advance.'
-    $signal.Tag.Random = [Random]::new(1234)
-    $lightPosition = $signal.Tag.LightY
-    Update-MonitorAnimation $window
-    Assert-True ($window.FindName('LogoGlow').Opacity -eq 0.20) 'Logo illumination is disabled.'
-    Assert-True ($signal.Parent -eq $window.FindName('AmbientField') -and $null -eq $window.FindName('LogoFragments')) 'Logo is not an intact terminal background.'
-    Assert-True ($signal.Tag.LightY -gt $lightPosition -and $window.FindName('LogoPath').RenderTransform.Value.IsIdentity) 'Logo illumination moved or distorted the silhouette.'
-    $index = $signal.Tag.Index
+    Assert-True ($signal.Tag.Index -eq $index+1 -and $null -eq $window.FindName('LogoGlow')) 'Polling must not run a permanent decorative animation.'
     $window.WindowState = 'Minimized'
     Update-MonitorAnimation $window
-    Assert-True ($signal.Tag.Index -eq $index -and $window.FindName('LogoGlow').Opacity -eq 0) 'Minimized window kept animating.'
+    Assert-True ($signal.Tag.Index -eq $index+1) 'Minimized window kept updating telemetry.'
     $window.WindowState = 'Normal'
-    Update-MonitorAnimation $window
-    Assert-True ($signal.Tag.Index -eq $index+1) 'Restored window did not resume animation.'
-    Assert-True ($window.FindName('LogText').Text -eq 'Synthetic log' -and $window.FindName('Progress').Value -eq 42) 'Decorative glitch changed operational content.'
+    Assert-True ($window.FindName('LogText').Text -eq 'Synthetic log' -and $window.FindName('Progress').Value -eq 42) 'Presentation changed operational content.'
     $snapshot.Log = (1..20 | ForEach-Object { "Synthetic line $_" }) -join "`r`n"
     Update-MonitorView $window $snapshot
     Assert-True ($window.FindName('LogText').Tag.Visible -gt 0 -and $window.FindName('LogText').Tag.Visible -lt 20) 'Log did not reveal progressively.'
@@ -183,6 +420,7 @@ try {
         Update-MonitorAnimation $window
         Assert-True ($signal.Tag.Index -eq $index+1) "Phase $phase stopped terminal animation."
     }
+    $state.ActiveOperation = ''
     $state.Status = 'WaitingForReboot'
     $state.Phase = 'RestartCountdown'
     $state.Message = 'Restart in 75 seconds. Save your work.'
@@ -206,7 +444,7 @@ try {
         $index = $signal.Tag.Index
         Update-MonitorAnimation $window
         Assert-True ($signal.Tag.Index -eq $index+1) "Terminal status $status stopped decorative animation."
-        Assert-True ($window.FindName('LogoGlow').Opacity -eq 0.20 -and $window.FindName('ProgressText').Text -eq '--') "Terminal status $status lost illumination or fabricated progress."
+        Assert-True ($null -eq $window.FindName('LogoGlow') -and $window.FindName('ProgressText').Text -eq '--') "Terminal status $status started decorative animation or fabricated progress."
     }
     $state.Status = 'Blocked'
     $state.ActiveOperation = 'Install'
@@ -295,10 +533,26 @@ try {
     $null = $reader.Invoke()
     $reader.Dispose()
     $reader = $null
+    Test-MonitorTransitions $window $state $snapshot
     $window.Close()
     $window = $null
     Write-Output "PASS: $script:checks WPF checks (PowerShell $($PSVersionTable.PSVersion), native XAML/controls, synthetic states and background I/O; no updates or restarts)."
-    if ($Preview) { Invoke-Monitor }
+    if ($Preview) {
+        $previewStates = @{ NoUpdates='Completed'; Completed='Completed'; Partial='CompletedWithErrors'; Error='Blocked'; Reboot='WaitingForReboot'; Stopped='Stopped' }
+        if ($PreviewOutcome -ne 'Running') {
+            $state.Status = $previewStates[$PreviewOutcome]
+            $state.Phase = $state.Status
+            $state.ActiveOperation = ''
+            $state.RebootCommitted = $false
+            $state.Failures = @()
+            $state.Installed = @()
+            $state.Message = 'ANTEPRIMA SINTETICA: nessuna operazione Windows Update o riavvio reale.'
+            if ($PreviewOutcome -in @('Completed','Partial')) { $state.Installed = @([pscustomobject]@{Title='Synthetic success'}) }
+            if ($PreviewOutcome -in @('Partial','Error')) { $state.Failures = @([pscustomobject]@{Title='Synthetic error'; Reason='Synthetic failure'; Resolved=$false}) }
+            Save-State $state
+        }
+        Invoke-Monitor
+    }
 } finally {
     if ($null -ne $window) { $window.Close() }
     if ($null -ne $reader) {

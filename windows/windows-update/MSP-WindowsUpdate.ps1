@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Installs applicable Windows updates and resumes automatically after restarts.
@@ -2051,13 +2051,64 @@ function New-MonitorWindow {
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="Windows Update" Width="900" Height="540" MinWidth="640" MinHeight="480"
-        WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
-        Background="#090B09" Foreground="#E5C56C" FontFamily="Consolas" FontSize="13"
+        WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
+        Background="Transparent" Foreground="#E5C56C" FontFamily="Consolas" FontSize="13"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
   <shell:WindowChrome.WindowChrome>
     <shell:WindowChrome CaptionHeight="23" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
   </shell:WindowChrome.WindowChrome>
   <Window.Resources>
+    <RadialGradientBrush x:Key="DimBackdrop" Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
+      <GradientStop Color="#66000000" Offset="0"/>
+      <GradientStop Color="#99000000" Offset="0.5"/>
+      <GradientStop Color="#EB000000" Offset="1"/>
+    </RadialGradientBrush>
+    <Storyboard x:Key="GhostAttack" Duration="0:0:1.18" FillBehavior="Stop">
+      <ObjectAnimationUsingKeyFrames Storyboard.TargetName="IntroLayer" Storyboard.TargetProperty="Visibility">
+        <DiscreteObjectKeyFrame KeyTime="0" Value="{x:Static Visibility.Visible}"/>
+        <DiscreteObjectKeyFrame KeyTime="0:0:1.18" Value="{x:Static Visibility.Collapsed}"/>
+      </ObjectAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="IntroScale" Storyboard.TargetProperty="ScaleX">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="0.015"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:0.45" Value="0.55" KeySpline="0.2,0 0.4,1"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:0.65" Value="0.6"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:0.71" Value="1.8" KeySpline="0.1,0 0.25,0.9"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:0.79" Value="1.98"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:1.01" Value="8" KeySpline="0.33,0.03 0.65,0.6"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="IntroScale" Storyboard.TargetProperty="ScaleY">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="0.015"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:0.45" Value="0.55" KeySpline="0.2,0 0.4,1"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:0.65" Value="0.6"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:0.71" Value="1.8" KeySpline="0.1,0 0.25,0.9"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:0.79" Value="1.98"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:1.01" Value="8" KeySpline="0.33,0.03 0.65,0.6"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="IntroFocus" Storyboard.TargetProperty="Y">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="0"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:0.79" Value="0"/>
+        <SplineDoubleKeyFrame KeyTime="0:0:1.01" Value="472" KeySpline="0.33,0.03 0.65,0.6"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="IntroGhost" Storyboard.TargetProperty="Opacity">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="1"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:1.05" Value="0"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="WindowSurface" Storyboard.TargetProperty="Opacity">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="0"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:1.05" Value="1"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="DimLayer" Storyboard.TargetProperty="Opacity">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="1"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:1.05" Value="0"/>
+      </DoubleAnimationUsingKeyFrames>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="Impact" Storyboard.TargetProperty="Opacity">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="0"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:1.01" Value="0"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:1.03" Value="1"/>
+        <DiscreteDoubleKeyFrame KeyTime="0:0:1.09" Value="1"/>
+        <LinearDoubleKeyFrame KeyTime="0:0:1.18" Value="0"/>
+      </DoubleAnimationUsingKeyFrames>
+    </Storyboard>
     <SolidColorBrush x:Key="Ink" Color="#E5C56C"/>
     <SolidColorBrush x:Key="Muted" Color="#B0A074"/>
     <SolidColorBrush x:Key="Accent" Color="#F0CD67"/>
@@ -2103,9 +2154,9 @@ function New-MonitorWindow {
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#DAC066"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#273247"/><Setter Property="Foreground" Value="#F0F5FF"/></Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#FFF0B6"/><Setter TargetName="Frame" Property="BorderThickness" Value="2"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#FFF0B6"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#43516B"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
               <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -2155,38 +2206,27 @@ function New-MonitorWindow {
       </ControlTemplate></Setter.Value></Setter>
     </Style>
   </Window.Resources>
-  <Border x:Name="WindowSurface" BorderThickness="0">
-    <Grid>
-      <Grid.RowDefinitions><RowDefinition Height="23"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Grid ClipToBounds="True">
+  <Border x:Name="DimLayer" Background="{StaticResource DimBackdrop}" Visibility="Collapsed" IsHitTestVisible="False"/>
+  <Border x:Name="WindowSurface" Background="#111827" BorderThickness="0">
+    <Grid ClipToBounds="True">
+      <Grid.RowDefinitions><RowDefinition x:Name="ChromeRow" Height="23"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <Grid x:Name="AmbientField" Grid.RowSpan="3" ClipToBounds="True" IsHitTestVisible="False">
         <Grid x:Name="LogoHost" Margin="48,28" IsHitTestVisible="False">
           <Path x:Name="LogoPath" Fill="{StaticResource Accent}" Opacity="0.16" Stretch="Uniform" AutomationProperties.Name="Logo">
             <Path.CacheMode><BitmapCache/></Path.CacheMode>
           </Path>
-          <Path x:Name="LogoGlow" Data="{Binding Data, ElementName=LogoPath}" Stretch="Uniform" Opacity="0">
-            <Path.Fill>
-              <LinearGradientBrush x:Name="LogoLight" StartPoint="0,-0.4" EndPoint="0,0">
-                <GradientStop Color="#00F0CD67" Offset="0"/>
-                <GradientStop Color="#FFF0CD67" Offset="0.5"/>
-                <GradientStop Color="#00F0CD67" Offset="1"/>
-              </LinearGradientBrush>
-            </Path.Fill>
-          </Path>
         </Grid>
-        <TextBlock x:Name="NoiseText" FontSize="11" LineHeight="14" LineStackingStrategy="BlockLineHeight" Foreground="#8D783B" Opacity="0.25" VerticalAlignment="Top" HorizontalAlignment="Left">
-          <TextBlock.RenderTransform><TranslateTransform x:Name="NoiseShift"/></TextBlock.RenderTransform>
-        </TextBlock>
-        <Border x:Name="ScanBand" Height="26" VerticalAlignment="Top" Background="#D4B654" Opacity="0">
-          <Border.RenderTransform><TranslateTransform x:Name="ScanShift"/></Border.RenderTransform>
-        </Border>
       </Grid>
-      <Grid>
+      <Grid x:Name="ChromeControls">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <Button x:Name="MinimizeButton" Grid.Column="1" Content="_" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Minimize"/>
         <Button x:Name="MaximizeButton" Grid.Column="2" Content="[]" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Maximize or restore"/>
         <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Close window"/>
       </Grid>
-      <ScrollViewer Grid.Row="1" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Grid x:Name="Scene" Grid.Row="1" Grid.RowSpan="2">
+      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <ScrollViewer x:Name="OperationalView" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
           <Grid.Style><Style TargetType="Grid">
             <Setter Property="MinHeight" Value="460"/>
@@ -2252,31 +2292,55 @@ function New-MonitorWindow {
             <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
                    FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
                    HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
-            <TextBlock x:Name="TearNoise" Text="___//__    ::  ||| /   _  ::::    ///____  |:|   __//__" Foreground="#F0CD67" FontSize="11" Opacity="0" IsHitTestVisible="False" HorizontalAlignment="Right" VerticalAlignment="Top">
-              <TextBlock.RenderTransform><TranslateTransform x:Name="TearNoiseShift"/></TextBlock.RenderTransform>
-            </TextBlock>
           </Grid>
         </Grid>
       </ScrollViewer>
-      <StackPanel Grid.Row="2" Margin="12,3,12,7">
+      <ScrollViewer x:Name="OutcomeView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="28,16,28,12" VerticalAlignment="Center">
+          <Path x:Name="OutcomeGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#9DE6ED" Height="160" Stretch="Uniform" RenderTransformOrigin="0.5,0.5" Margin="0,0,0,24">
+            <Path.CacheMode><BitmapCache RenderAtScale="2"/></Path.CacheMode>
+          </Path>
+          <StackPanel x:Name="OutcomeMessage">
+            <Viewbox Stretch="Uniform" Height="48" Margin="0,0,0,16">
+              <Path x:Name="OutcomeTitle" Fill="#9DE6ED"/>
+            </Viewbox>
+            <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="16" Foreground="#EDF1FA"/>
+            <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="#B8C3D9" Margin="0,16,0,0"/>
+            <TextBox x:Name="OutcomeDetail" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="76" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"
+                     Background="Transparent" Foreground="#CED5E5" BorderThickness="0" FontSize="12" AutomationProperties.Name="Dettaglio dell'esito"/>
+          </StackPanel>
+        </StackPanel>
+      </ScrollViewer>
+      <StackPanel Grid.Row="1" Margin="12,3,12,7">
         <ScrollViewer MaxHeight="50" VerticalScrollBarVisibility="Auto">
           <TextBlock x:Name="NoticeText" Text="Closing this window does not stop updates." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11"/>
         </ScrollViewer>
-        <WrapPanel Margin="0,4,0,0" VerticalAlignment="Center">
-          <TextBlock Text="&gt;&gt; " VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
+        <WrapPanel x:Name="FooterActions" Margin="0,10,0,4" VerticalAlignment="Center" HorizontalAlignment="Center">
+          <TextBlock x:Name="PromptMark" Text="&gt;&gt; " VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
           <Button x:Name="StopButton" Content="_STOP [alt+s]" IsEnabled="False" ToolTip="Cooperative stop: the current installation may finish before updates stop."/>
-          <TextBlock Text=" / " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-          <Button x:Name="CloseButton" Content="_CLOSE [alt+c]" ToolTip="Closes this window; updates continue in the background."/>
+          <TextBlock x:Name="StopSeparator" Text=" / " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+          <Button x:Name="ResultLogButton" Content="Visualizza _log" Visibility="Collapsed" Margin="0,0,18,0"/>
+          <Button x:Name="CloseButton" Content="_Chiudi [alt+c]" ToolTip="Chiude la finestra; il lavoro attivo continua in background."/>
           <TextBlock x:Name="PromptCursor" Text="_" Margin="6,0,0,0" VerticalAlignment="Center"/>
         </WrapPanel>
       </StackPanel>
-      <Rectangle Grid.Row="1" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="0.045"><Rectangle.Fill>
+      </Grid>
+      <Rectangle x:Name="TerminalTexture" Grid.Row="1" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="0.045"><Rectangle.Fill>
         <DrawingBrush TileMode="Tile" Viewport="0,0,4,4" ViewportUnits="Absolute" Viewbox="0,0,4,4" ViewboxUnits="Absolute">
           <DrawingBrush.Drawing><GeometryDrawing Brush="#BDA04B" Geometry="M 0,0 L 4,0 4,1 0,1 Z"/></DrawingBrush.Drawing>
         </DrawingBrush>
       </Rectangle.Fill></Rectangle>
     </Grid>
   </Border>
+      <Grid x:Name="IntroLayer" Background="Transparent" Visibility="Collapsed" IsHitTestVisible="False" ClipToBounds="True">
+        <Path x:Name="IntroGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#F1EDFF" Width="600" Height="492" Stretch="Uniform"
+              HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.42">
+          <Path.CacheMode><BitmapCache RenderAtScale="4"/></Path.CacheMode>
+          <Path.RenderTransform><TransformGroup><ScaleTransform x:Name="IntroScale"/><TranslateTransform x:Name="IntroFocus"/></TransformGroup></Path.RenderTransform>
+        </Path>
+        <Border x:Name="Impact" Background="Black" Opacity="0"/>
+      </Grid>
+  </Grid>
 
 </Window>
 '@
@@ -2301,80 +2365,330 @@ function New-MonitorWindow {
     })
     $geometry = Get-MonitorLogoGeometry
     $window.FindName('LogoPath').Data = $geometry
-    $random = [Random]::new()
-    $alphabet = '.:/|_01#'
-    $noiseRows = @(for ($r=0; $r -lt 24; $r++) {
-        $row = [Text.StringBuilder]::new()
-        for ($c=0; $c -lt 192; $c++) {
-            $char = if ($random.Next(100) -lt 17) { $alphabet[$random.Next($alphabet.Length)] } else { ' ' }
-            [void]$row.Append($char)
-        }
-        $row.ToString()
-    })
-    $window.FindName('LogoHost').Tag = [pscustomobject]@{
-        Index=0L; Random=$random; LightY=-0.2; LightSpeed=0.012
-        NextTone=0L; LogoTone=0.16; NextNoise=0L; NoiseRows=$noiseRows; ScanY=0.0; ScanSpeed=4.0
+    $window.Tag = [pscustomobject]@{
+        Outcome=''; ShowLog=$false; Motion=$true; Intro=$false; Storyboard=$null; Pulse=$false
+        AlternateColor=[Windows.Media.Colors]::White
+        WindowPlacement=$null; Closing=$false; ChangingPlacement=$false
+        SceneBackground=$window.FindName('WindowSurface').Background
     }
+    $window.FindName('LogoHost').Tag = [pscustomobject]@{ Index=0L; Random=[Random]::new() }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
+    $window.FindName('ResultLogButton').add_Click({ param($sender, $eventArgs)
+        $target = [Windows.Window]::GetWindow($sender)
+        Stop-MonitorTransition $target
+        $target.Tag.ShowLog = -not $target.Tag.ShowLog
+        Set-MonitorScene $target
+    })
+    $window.add_Loaded({ param($sender, $eventArgs)
+        if (-not $sender.Tag.Intro) {
+            $sender.Tag.Intro = $true
+            Start-MonitorTransition $sender 'GhostAttack'
+        }
+        Set-MonitorOutcomePulse $sender
+    })
+    $window.add_StateChanged({ param($sender, $eventArgs)
+        if (-not $sender.Tag.ChangingPlacement -and
+            ($sender.WindowState -eq 'Minimized' -or ($null -eq $sender.Tag.Storyboard -and $null -ne $sender.Tag.WindowPlacement))) {
+            Stop-MonitorTransition $sender
+        }
+        Set-MonitorOutcomePulse $sender
+    })
+    $window.add_PreviewKeyDown({ param($sender, $eventArgs)
+        if ($eventArgs.Key -eq 'Escape' -and $null -ne $sender.Tag.WindowPlacement) {
+            Stop-MonitorTransition $sender
+            Set-MonitorOutcomePulse $sender
+            $eventArgs.Handled = $true
+        }
+    })
+    $window.add_Closed({ param($sender, $eventArgs)
+        Set-MonitorOutcomePulse $sender -Stop
+        $sender.Tag.Closing = $true
+        Stop-MonitorTransition $sender
+    })
+    foreach ($name in @('GhostAttack')) {
+        $animation = $window.Resources[$name]
+        $target = $window
+        $stopTransition = ${function:Stop-MonitorTransition}
+        $syncPulse = ${function:Set-MonitorOutcomePulse}
+        $animation.add_Completed({
+            if ($target.Tag.Storyboard -eq $animation) { & $stopTransition $target; & $syncPulse $target }
+        }.GetNewClosure())
+    }
     return $window
+}
+
+function Stop-MonitorTransition {
+    param([object]$Window)
+    if ($null -ne $Window.Tag.Storyboard) {
+        $Window.Tag.Storyboard.Remove($Window)
+        $Window.Tag.Storyboard = $null
+    }
+    $placement = $Window.Tag.WindowPlacement
+    # While minimized, retain the placement until restore without reactivating the window.
+    if ($Window.WindowState -eq 'Minimized' -and -not $Window.Tag.Closing) { return }
+    $Window.Tag.WindowPlacement = $null
+    if ($null -eq $placement -or $Window.Tag.Closing) { return }
+    $Window.Tag.ChangingPlacement = $true
+    try {
+        # Restore normal bounds before reapplying the original state.
+        $Window.WindowState = 'Normal'
+        $Window.ResizeMode = $placement.ResizeMode
+        [Windows.Shell.WindowChrome]::SetWindowChrome($Window, $placement.Chrome)
+        $Window.Left = $placement.Bounds.Left
+        $Window.Top = $placement.Bounds.Top
+        $Window.Width = $placement.Bounds.Width
+        $Window.Height = $placement.Bounds.Height
+        $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(23)
+        $Window.FindName('ChromeControls').Visibility = 'Visible'
+        $Window.FindName('Scene').IsHitTestVisible = $true
+        $Window.FindName('OutcomeGhost').Height = 160
+        $surface = $Window.FindName('WindowSurface')
+        $surface.Width = [double]::NaN
+        $surface.Height = [double]::NaN
+        $surface.Margin = [Windows.Thickness]::new(0)
+        $surface.HorizontalAlignment = 'Stretch'
+        $surface.VerticalAlignment = 'Stretch'
+        $surface.IsHitTestVisible = $true
+        $surface.Background = $Window.Tag.SceneBackground
+        $Window.FindName('DimLayer').Visibility = 'Collapsed'
+        $Window.FindName('TerminalTexture').Visibility = 'Visible'
+        $Window.FindName('AmbientField').Visibility = $(if ($Window.Tag.Outcome -and -not $Window.Tag.ShowLog) { 'Collapsed' } else { 'Visible' })
+        $Window.WindowState = $placement.State
+    } finally { $Window.Tag.ChangingPlacement = $false }
+}
+
+function Start-MonitorTransition {
+    param([object]$Window, [string]$Name)
+    if ($Name -ne 'GhostAttack') { return }
+    Stop-MonitorTransition $Window
+    Set-MonitorOutcomePulse $Window -Stop
+    try {
+        if (-not $Window.Tag.Motion -or -not $Window.IsLoaded -or $Window.WindowState -eq 'Minimized' -or
+            -not [Windows.SystemParameters]::ClientAreaAnimation -or [Windows.SystemParameters]::HighContrast -or
+            ([Windows.Media.RenderCapability]::Tier -shr 16) -eq 0) { return }
+        $Window.Tag.WindowPlacement = [pscustomobject]@{
+            Bounds=$Window.RestoreBounds; State=$Window.WindowState; ResizeMode=$Window.ResizeMode
+            Chrome=[Windows.Shell.WindowChrome]::GetWindowChrome($Window); Name=$Name
+        }
+        $appOrigin = $Window.PointToScreen([Windows.Point]::new(0,0))
+        $appSize = [Windows.Size]::new($Window.ActualWidth, $Window.ActualHeight)
+        $Window.Tag.ChangingPlacement = $true
+        # Native borderless maximization covers the current monitor, including its taskbar, in WPF units.
+        [Windows.Shell.WindowChrome]::SetWindowChrome($Window, $null)
+        # Removing WindowChrome resets the native target to SystemColors.WindowColor.
+        [Windows.PresentationSource]::FromVisual($Window).CompositionTarget.BackgroundColor = [Windows.Media.Colors]::Transparent
+        $Window.ResizeMode = 'NoResize'
+        $Window.FindName('ChromeControls').Visibility = 'Collapsed'
+        $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(0)
+        $Window.FindName('Scene').IsHitTestVisible = $false
+        # Per-pixel alpha dims the live desktop without fading the ghost or capturing the screen.
+        $surface = $Window.FindName('WindowSurface')
+        $surface.IsHitTestVisible = $false
+        $surface.Background = [Windows.Media.Brushes]::Transparent
+        $Window.FindName('DimLayer').Visibility = 'Visible'
+        $Window.FindName('AmbientField').Visibility = 'Collapsed'
+        $Window.FindName('TerminalTexture').Visibility = 'Collapsed'
+        $Window.WindowState = 'Normal'
+        $Window.WindowState = 'Maximized'
+        $Window.UpdateLayout()
+        if ($Name -eq 'GhostAttack') {
+            # Reveal the app at its original desktop position behind the fullscreen ghost.
+            $origin = $Window.PointFromScreen($appOrigin)
+            $surface.HorizontalAlignment = 'Left'
+            $surface.VerticalAlignment = 'Top'
+            $surface.Width = $appSize.Width
+            $surface.Height = $appSize.Height
+            $surface.Margin = [Windows.Thickness]::new($origin.X, $origin.Y, 0, 0)
+            $surface.Background = $Window.Tag.SceneBackground
+            $Window.FindName('ChromeControls').Visibility = 'Visible'
+            $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(23)
+            $Window.FindName('TerminalTexture').Visibility = 'Visible'
+            $Window.FindName('AmbientField').Visibility = $(if ($Window.Tag.Outcome -and -not $Window.Tag.ShowLog) { 'Collapsed' } else { 'Visible' })
+            $scale = 2.4 * [Math]::Max($Window.ActualWidth/600, $Window.ActualHeight/492)
+            $readableScale = 0.85 * [Math]::Min($Window.ActualWidth/600, $Window.ActualHeight/492)
+            foreach ($timeline in $Window.Resources[$Name].Children) {
+                if ([Windows.Media.Animation.Storyboard]::GetTargetName($timeline) -eq 'IntroScale') {
+                    $timeline.KeyFrames[3].Value = $readableScale
+                    $timeline.KeyFrames[4].Value = $readableScale * 1.1
+                    $timeline.KeyFrames[5].Value = $scale
+                } elseif ([Windows.Media.Animation.Storyboard]::GetTargetName($timeline) -eq 'IntroFocus') {
+                    # Keep the face near the screen center during the final close-up.
+                    $timeline.KeyFrames[2].Value = 492 * (0.08 + 0.11*$scale)
+                }
+            }
+        }
+        $Window.Tag.Storyboard = $Window.Resources[$Name]
+        $Window.Tag.Storyboard.Begin($Window, $true)
+    } catch {
+        # Base values are the usable static scene; failed effects must never hide a result.
+        Stop-MonitorTransition $Window
+        $Window.Tag.Motion = $false
+    } finally { $Window.Tag.ChangingPlacement = $false }
+}
+
+function Get-MonitorOutcome {
+    param([object]$State)
+    # Presentation of worker decisions only. Never query WUA or infer completion from progress.
+    $kind = ''
+    switch ($State.Status) {
+        'Completed' { $kind = if (@($State.Installed).Count) { 'Completed' } else { 'NoUpdates' } }
+        'CompletedWithExclusions' { $kind = 'Partial' }
+        'CompletedWithErrors' { $kind = if (@($State.Installed).Count) { 'Partial' } else { 'Error' } }
+        'Blocked' { $kind = 'Error' }
+        'Stopped' { $kind = 'Stopped' }
+        'WaitingForReboot' { $kind = 'Reboot' }
+    }
+    if (-not $kind) { return $null }
+    # Even a blocked run may still have a native operation in flight; keep telemetry visible.
+    if ($State.ActiveOperation) { return $null }
+    if ($State.RebootCommitted -and $kind -ne 'Error') { $kind = 'Reboot' }
+    $titles = @{ NoUpdates='GIRO A VUOTO'; Completed='COMPLETATO'; Partial='PARZIALE'; Error='ERRORE'; Reboot='RIAVVIO RICHIESTO'; Stopped='INTERROTTO' }
+    $descriptions = @{
+        NoUpdates='Nessun aggiornamento trovato.'
+        Completed='Aggiornamenti installati correttamente.'
+        Partial='Alcuni aggiornamenti non sono stati installati.'
+        Error='Operazione non riuscita. Dettagli nel log.'
+        Reboot='Riavvio necessario per proseguire.'
+        Stopped='Arresto richiesto dall''operatore.'
+    }
+    $colors = @{ NoUpdates='#A5BDD8'; Completed='#AFA4F5'; Partial='#F0CD67'; Error='#FF9987'; Reboot='#FFB16C'; Stopped='#B8C3D9' }
+    $alternates = @{ NoUpdates='#30243F'; Completed='#153A37'; Partial='#402639'; Error='#40331D'; Reboot='#2F2543'; Stopped='#18383D' }
+    $backgrounds = @{ NoUpdates='#182536'; Completed='#241D3B'; Partial='#30291E'; Error='#371F2B'; Reboot='#33241F'; Stopped='#202735' }
+    return [pscustomobject]@{ Kind=$kind; Title=$titles[$kind]; Description=$descriptions[$kind]; Color=$colors[$kind]; AlternateColor=$alternates[$kind]; Background=$backgrounds[$kind] }
+}
+
+function Get-MonitorPixelTitle {
+    param([string]$Text)
+    # Small native vector alphabet: no font download, bitmap scaling or ASCII line wrapping.
+    $glyphs = @{
+        A='01110/10001/10001/11111/10001/10001/10001'; C='01111/10000/10000/10000/10000/10000/01111'
+        D='11110/10001/10001/10001/10001/10001/11110'; E='11111/10000/10000/11110/10000/10000/11111'
+        G='01110/10001/10000/10111/10001/10001/01110'
+        H='10001/10001/10001/11111/10001/10001/10001'; I='111/010/010/010/010/010/111'
+        L='10000/10000/10000/10000/10000/10000/11111'; M='10001/11011/10101/10101/10001/10001/10001'
+        N='10001/11001/11001/10101/10011/10011/10001'; O='01110/10001/10001/10001/10001/10001/01110'
+        P='11110/10001/10001/11110/10000/10000/10000'; Q='01110/10001/10001/10001/10101/10010/01101'
+        R='11110/10001/10001/11110/10100/10010/10001'; S='01111/10000/10000/01110/00001/00001/11110'
+        T='11111/00100/00100/00100/00100/00100/00100'; U='10001/10001/10001/10001/10001/10001/01110'
+        V='10001/10001/10001/10001/10001/01010/00100'; Z='11111/00001/00010/00100/01000/10000/11111'
+    }
+    $geometry = [Windows.Media.GeometryGroup]::new()
+    $x = 0
+    foreach ($letter in $Text.ToCharArray()) {
+        if ($letter -eq ' ') { $x += 12; continue }
+        $rows = $glyphs[[string]$letter] -split '/'
+        for ($y=0; $y -lt 7; $y++) {
+            for ($column=0; $column -lt $rows[$y].Length; $column++) {
+                if ($rows[$y][$column] -eq '1') {
+                    $geometry.Children.Add([Windows.Media.RectangleGeometry]::new([Windows.Rect]::new($x+$column*4, $y*4, 4, 4)))
+                }
+            }
+        }
+        $x += ($rows[0].Length+1)*4
+    }
+    $geometry.Freeze()
+    return $geometry
+}
+
+function Set-MonitorOutcomePulse {
+    param([object]$Window, [switch]$Stop)
+    $enabled = -not $Stop -and $Window.Tag.Outcome -and -not $Window.Tag.ShowLog -and
+        $Window.IsLoaded -and -not $Window.Tag.Closing -and $Window.WindowState -ne 'Minimized' -and
+        $null -eq $Window.Tag.Storyboard -and $null -eq $Window.Tag.WindowPlacement -and
+        $Window.Tag.Motion -and [Windows.SystemParameters]::ClientAreaAnimation -and
+        -not [Windows.SystemParameters]::HighContrast -and ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
+    if ([bool]$enabled -eq $Window.Tag.Pulse) { return }
+    $brush = $Window.Tag.SceneBackground
+    if ($enabled) {
+        # Alternate the result background only; logo, text and controls remain steady.
+        $animation = [Windows.Media.Animation.ColorAnimationUsingKeyFrames]::new()
+        $animation.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds(1.6))
+        $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$animation.KeyFrames.Add([Windows.Media.Animation.DiscreteColorKeyFrame]::new($brush.Color, [Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::Zero)))
+        [void]$animation.KeyFrames.Add([Windows.Media.Animation.DiscreteColorKeyFrame]::new($Window.Tag.AlternateColor, [Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds(0.8))))
+        $brush.BeginAnimation([Windows.Media.SolidColorBrush]::ColorProperty, $animation)
+    } else { $brush.BeginAnimation([Windows.Media.SolidColorBrush]::ColorProperty, $null) }
+    $Window.Tag.Pulse = [bool]$enabled
+}
+
+function Set-MonitorScene {
+    param([object]$Window)
+    $result = [bool]$Window.Tag.Outcome
+    $showResult = $result -and -not $Window.Tag.ShowLog
+    $Window.FindName('OperationalView').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
+    $Window.FindName('OutcomeView').Visibility = $(if ($showResult) { 'Visible' } else { 'Collapsed' })
+    $Window.FindName('AmbientField').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
+    $Window.FindName('WindowSurface').Background = $Window.Tag.SceneBackground
+    $Window.FindName('ResultLogButton').Visibility = $(if ($result) { 'Visible' } else { 'Collapsed' })
+    $Window.FindName('ResultLogButton').Content = $(if ($Window.Tag.ShowLog) { 'Torna all''_esito' } else { 'Visualizza _log' })
+    $Window.FindName('StopButton').Visibility = $(if ($result -and $Window.Tag.Outcome -ne 'Reboot') { 'Collapsed' } else { 'Visible' })
+    $Window.FindName('StopSeparator').Visibility = $Window.FindName('StopButton').Visibility
+    foreach ($name in @('NoticeText','PromptMark','PromptCursor')) {
+        $Window.FindName($name).Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
+    }
+    $ink = if ($result) { [Windows.Media.SolidColorBrush]::new($Window.FindName('OutcomeTitle').Fill.GetAnimationBaseValue([Windows.Media.SolidColorBrush]::ColorProperty)) } else { $Window.Resources['Ink'] }
+    foreach ($control in $Window.FindName('FooterActions').Children) {
+        if ($control -is [Windows.Controls.Button]) { $control.Foreground = $ink }
+    }
+    Set-MonitorOutcomePulse $Window
+}
+
+function Update-MonitorOutcome {
+    param([object]$Window, [object]$Snapshot)
+    $state = $Snapshot.State
+    $outcome = Get-MonitorOutcome $state
+    $kind = if ($null -eq $outcome) { '' } else { $outcome.Kind }
+    $changed = $Window.Tag.Outcome -ne $kind
+    if ($changed) {
+        Set-MonitorOutcomePulse $Window -Stop
+        $Window.Tag.Outcome = $kind
+        $Window.Tag.ShowLog = $false
+    }
+    if ($null -ne $outcome) {
+        if ($changed) {
+            $Window.FindName('OutcomeTitle').Data = Get-MonitorPixelTitle $outcome.Title
+            [Windows.Automation.AutomationProperties]::SetName($Window.FindName('OutcomeTitle'), $outcome.Title)
+            $brush = [Windows.Media.BrushConverter]::new().ConvertFromString($outcome.Color)
+            $Window.FindName('OutcomeTitle').Fill = $brush
+            $Window.FindName('OutcomeGhost').Fill = $brush
+            $Window.Tag.AlternateColor = [Windows.Media.ColorConverter]::ConvertFromString($outcome.AlternateColor)
+            $Window.Tag.SceneBackground = [Windows.Media.BrushConverter]::new().ConvertFromString($outcome.Background)
+        }
+        $description = $outcome.Description
+        if ($kind -eq 'Reboot') {
+            if ($state.RebootCommitted) { $description += ' Riavvio già confermato: non annullabile dalla finestra.' }
+            elseif ($Snapshot.StopRequested) { $description += ' Arresto richiesto, in attesa del worker.' }
+            elseif ($state.Phase -eq 'RestartCountdown' -and $state.Message -match '^Restart in (\d+) seconds\.') {
+                $description += " Ultimo countdown comunicato: $($Matches[1]) s. Salvare il lavoro."
+            }
+        }
+        if ($state.CleanupError) { $description += ' Pulizia incompleta: consultare il dettaglio.' }
+        if ($kind -eq 'Error' -and $state.RebootCommitted) { $description += ' Esito del riavvio non confermato.' }
+        $Window.FindName('OutcomeDescription').Text = $description
+        $counts = @()
+        if (@($state.Installed).Count) { $counts += 'Installati: ' + @($state.Installed).Count }
+        $errors = @($state.Failures | Where-Object { -not $_.Resolved }).Count
+        if ($errors) { $counts += 'Errori: ' + $errors }
+        if (@($state.Skipped).Count) { $counts += 'Esclusi: ' + @($state.Skipped).Count }
+        $Window.FindName('OutcomeCounts').Text = $counts -join '  /  '
+        $Window.FindName('OutcomeCounts').Visibility = $(if ($counts.Count) { 'Visible' } else { 'Collapsed' })
+        $detail = [string]$state.Message
+        if ($state.CleanupError) { $detail += "`r`nPulizia incompleta: $($state.CleanupError)" }
+        $Window.FindName('OutcomeDetail').Text = $detail
+    } elseif ($changed) { $Window.Tag.SceneBackground = [Windows.Media.BrushConverter]::new().ConvertFromString('#111827') }
+    Set-MonitorScene $Window
+
 }
 
 function Update-MonitorAnimation {
     param([object]$Window)
-    $motion = $Window.FindName('LogoHost').Tag
-    # Terminal effects are part of this view, independent of worker phase and Windows chrome animations.
-    $moving = $Window.WindowState -ne 'Minimized'
-    Update-MonitorLog $Window -Immediate:(-not $moving)
-    if ($moving) {
-        $motion.Index++
-        if ($motion.Index % 8 -eq 0 -and $null -ne $Window.FindName('Activity').Tag) {
+    Set-MonitorOutcomePulse $Window
+    Update-MonitorLog $Window -Immediate:($Window.WindowState -eq 'Minimized' -or -not $Window.Tag.Motion)
+    if ($Window.WindowState -ne 'Minimized') {
+        $Window.FindName('LogoHost').Tag.Index++
+        if ($null -ne $Window.FindName('Activity').Tag) {
             Update-MonitorTelemetry $Window $Window.FindName('Activity').Tag
         }
-        $Window.FindName('Activity').Opacity = $(if ($motion.Index % 8 -lt 4) { 0.9 } else { 0.35 })
-        $rng = $motion.Random
-        # Keep the supplied silhouette intact; only its illumination moves.
-        $motion.LightY += $motion.LightSpeed
-        if ($motion.LightY -gt 1.25) { $motion.LightY = -0.25; $motion.LightSpeed = 0.008+$rng.NextDouble()*0.008 }
-        $Window.FindName('LogoLight').StartPoint = [Windows.Point]::new(0, $motion.LightY-0.2)
-        $Window.FindName('LogoLight').EndPoint = [Windows.Point]::new(0, $motion.LightY+0.2)
-        $Window.FindName('LogoGlow').Opacity = 0.20
-        if ($motion.Index -ge $motion.NextTone) {
-            $motion.LogoTone = 0.13+$rng.NextDouble()*0.05
-            $motion.NextTone = $motion.Index+$rng.Next(9,36)
-        }
-        $base = $Window.FindName('LogoPath')
-        $base.Opacity += ($motion.LogoTone-$base.Opacity)*0.12
-        if ($motion.Index -ge $motion.NextNoise) {
-            $columns = [int][Math]::Ceiling([Math]::Max($Window.ActualWidth,$Window.Width)/6.6) + 4
-            $rows = [int][Math]::Ceiling([Math]::Max($Window.ActualHeight,$Window.Height)/14) + 4
-            $noise = @(for ($r=0; $r -lt $rows; $r++) {
-                $line = $motion.NoiseRows[$rng.Next($motion.NoiseRows.Count)]
-                ($line * [int][Math]::Ceiling($columns/192.0)).Substring(0,$columns)
-            })
-            $Window.FindName('NoiseText').Text = $noise -join "`n"
-            $motion.NextNoise = $motion.Index + $rng.Next(3,10)
-        }
-        $Window.FindName('NoiseShift').Y = -($motion.Index % 14)
-        $Window.FindName('NoiseShift').X = -($motion.Index % 3)*3
-        $burst = $rng.Next(45) -eq 0
-        $Window.FindName('TearNoise').Opacity = $(if ($burst) { 0.6 } else { 0 })
-        if ($burst) { $Window.FindName('TearNoiseShift').Y = $rng.NextDouble()*[Math]::Max(1,$Window.FindName('TerminalField').ActualHeight-15) }
-        $motion.ScanY += $motion.ScanSpeed
-        if ($motion.ScanY -gt $Window.ActualHeight) {
-            $motion.ScanY = -26
-            $motion.ScanSpeed = $rng.Next(3,12)
-        }
-        $Window.FindName('ScanBand').Opacity = 0.055
-        $Window.FindName('ScanShift').Y = $motion.ScanY
-        $Window.FindName('PromptCursor').Opacity = $(if ($motion.Index % 8 -lt 4) { 1.0 } else { 0.15 })
-    } else {
-        $Window.FindName('LogoPath').Opacity = 0.16
-        $Window.FindName('LogoGlow').Opacity = 0
-        $Window.FindName('TearNoise').Opacity = 0
-        $Window.FindName('ScanBand').Opacity = 0
-        $Window.FindName('NoiseShift').Y = 0
-        $Window.FindName('NoiseShift').X = 0
-        $Window.FindName('PromptCursor').Opacity = 1.0
     }
 }
 
@@ -2572,6 +2886,7 @@ function Update-MonitorView {
     $Window.FindName('StopButton').IsEnabled = -not $terminal -and -not $state.RebootCommitted -and -not $Snapshot.StopRequested
     $urgent = $terminal -or $Snapshot.StopRequested -or $state.RebootCommitted -or $state.Phase -eq 'RestartCountdown' -or $failures -gt 0 -or $state.CleanupError -or $Snapshot.Log -match '\[(ERROR|WARN|WARNING)\]'
     Update-MonitorLog $Window -Text $Snapshot.Log -AcceptSnapshot -Immediate:$urgent
+    Update-MonitorOutcome $Window $Snapshot
 }
 
 function Get-MonitorSnapshot {
@@ -2643,11 +2958,11 @@ function Invoke-Monitor {
         $view = [pscustomobject]@{ FinalRead=$false; Detached=$false; Pending=$null; NextRead=[DateTime]::MinValue; RequestStop=$false; Stopping=$false }
         $reader = New-MonitorReader
         $timer = [Windows.Threading.DispatcherTimer]::new()
-        $timer.Interval = [TimeSpan]::FromMilliseconds(120)
+        $timer.Interval = [TimeSpan]::FromMilliseconds(250)
         $refresh = {
             try {
                 Update-MonitorAnimation $window
-                if ($view.Detached) { return }
+                if ($view.Detached) { $timer.Stop(); return }
                 if ($null -ne $view.Pending) {
                     if (-not $view.Pending.IsCompleted) { return }
                     try {
@@ -2678,6 +2993,9 @@ function Invoke-Monitor {
                 }
                 if ($view.Stopping -or $view.RequestStop) { $window.FindName('StopButton').IsEnabled = $false }
             } catch {
+                Stop-MonitorTransition $window
+                $window.Tag.ShowLog = $true
+                Set-MonitorScene $window
                 $window.FindName('Activity').Tag = $null
                 $window.FindName('PhaseText').Text = 'READ / COMMAND FAILED'
                 $window.FindName('PhaseText').Foreground = $window.Resources['Error']
