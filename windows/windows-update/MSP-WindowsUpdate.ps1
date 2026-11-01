@@ -79,7 +79,7 @@ function Test-UwfEnabled {
     } catch {
         # Missing WMI namespace/class means UWF is not installed on this OS.
         if ($_.Exception -is [Microsoft.Management.Infrastructure.CimException] -and
-            [string]$_.Exception.CimStatusCode -in @('InvalidNamespace', 'InvalidClass')) {
+            [string]$_.Exception.StatusCode -in @('InvalidNamespace', 'InvalidClass')) {
             return $false
         }
         throw ('Unable to determine Unified Write Filter status: ' + $_.Exception.Message)
@@ -250,6 +250,7 @@ function Schedule-Reboot {
     $State.RebootBootId = Get-BootId
     $State.RebootRequestedUtc = [DateTime]::UtcNow.ToString('o')
     Set-Phase $State 'Restart' ("Reboot $($State.Reboots)/$($State.MaxReboots): $Reason")
+    if (Test-StopRequested $State) { return }
     # The countdown gives the operator a chance to issue Stop (shutdown /a).
     & "$env:SystemRoot\System32\shutdown.exe" /r /t 90 /c 'MSP Windows Update: automatic restart to continue installing updates.' | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -294,10 +295,10 @@ function Get-Candidates {
             continue
         }
         if (-not [bool]$State.IncludeOptional) {
-            # Require WUA's automatic-selection flag; do not infer optional status from titles.
+            # BrowseOnly is the documented WUA flag for optional updates.
             try {
-                if ([bool]$update.BrowseOnly -or -not [bool]$update.AutoSelectOnWebSites) {
-                    Add-Skipped $State $id $title 'Non-automatic or optional update excluded'
+                if ([bool]$update.BrowseOnly) {
+                    Add-Skipped $State $id $title 'Optional update excluded'
                     continue
                 }
             } catch {
@@ -460,7 +461,6 @@ function Invoke-Worker {
                 return
             }
             $state.EmptyScans = 0
-            $state.ConsecutiveErrors = 0
             Save-State $state
             Write-Log ("Found $($searchResult.Updates.Count) update(s); processing $($candidates.Count).")
             $progress = Install-Batch $state $session $candidates
@@ -469,6 +469,8 @@ function Invoke-Worker {
                 Set-Phase $state 'Retry' 'No installations succeeded; retrying on the next scheduled run.'
                 return
             }
+            $state.ConsecutiveErrors = 0
+            Save-State $state
             Start-Sleep -Seconds 15
         }
         Finish-Run $state 'Blocked' 'Exceeded 30 update passes without converging.'
@@ -584,13 +586,15 @@ function Invoke-Stop {
         return
     }
     [IO.File]::WriteAllText($script:StopPath, [DateTime]::UtcNow.ToString('o'))
-    # Cancel a pending reboot, without interrupting any update currently installing.
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        & "$env:SystemRoot\System32\shutdown.exe" /a 2>$null | Out-Null
-    } finally {
-        $ErrorActionPreference = $previousPreference
+    # Never abort a reboot that this maintenance run did not request.
+    if ($state.Status -eq 'WaitingForReboot') {
+        $previousPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & "$env:SystemRoot\System32\shutdown.exe" /a 2>$null | Out-Null
+        } finally {
+            $ErrorActionPreference = $previousPreference
+        }
     }
     Write-Host 'Stop requested. Current download/install operation may finish first.'
     $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
