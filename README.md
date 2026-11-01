@@ -1,6 +1,6 @@
 # DaScript
 
-## Avvio rapido — MSP Windows Update
+## Avvio rapido — DaScript Windows Update
 
 Aprire **Windows PowerShell 5.1 come amministratore** ed eseguire:
 
@@ -16,7 +16,7 @@ Raccolta di script PowerShell per **MSP, sysadmin e assistenza IT su Windows**. 
 
 | Script | Funzione | Stato |
 | --- | --- | --- |
-| [MSP Windows Update](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prima versione |
+| [DaScript Windows Update](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prima versione |
 
 ## Piattaforme
 

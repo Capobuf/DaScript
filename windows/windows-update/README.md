@@ -1,8 +1,10 @@
-# MSP Windows Update
+# DaScript Windows Update
 
 ## Avvio da URL GitHub
 
 I comandi seguenti caricano il bootstrap da `main`. A ogni nuovo avvio il bootstrap scarica il worker corrente dallo stesso branch, quindi le versioni pubblicate su `main` diventano disponibili senza cambiare il comando. Le esecuzioni già avviate continuano a usare la propria copia locale, anche dopo un riavvio.
+
+Le modifiche presenti soltanto nel checkout locale non vengono scaricate dal bootstrap, neppure lanciando `bootstrap.ps1` da disco. Per provarle usare direttamente il worker come indicato in **Avvio locale**. Il vecchio messaggio `Started. Logs: ...activity.log` identifica una versione che scrive ancora il log su disco.
 
 Client e Server (Windows PowerShell 5.1 come amministratore):
 
@@ -81,11 +83,15 @@ Nell'avvio locale diretto del worker su Windows Server, senza `-AllowServerReboo
 
 Il comando avvia un **monitor WPF/XAML separato**, integrato nello stesso `.ps1`, con un'unica superficie da terminale ambra: logo vettoriale fornito come filigrana centrale sullo sfondo del terminale, senza intestazione dedicata, etichette essenziali, righe compatte di stato e conteggi, comandi testuali sulla riga inferiore e trama CRT. Il logo resta intero e fermo: un passaggio di luce lento e variazioni graduali di intensità ne animano la superficie. Rumore di caratteri e banda di scansione animano lo sfondo dell'intera finestra; il cursore resta intermittente. Sono effetti decorativi: non alterano log, stato o percentuali. Mostra fase, percentuale della singola operazione WUA quando disponibile, aggiornamento corrente, conteggi, countdown e log. Il lavoro prosegue come `SYSTEM`, anche chiudendo la finestra o senza login.
 
-Il monitor usa le librerie WPF di **.NET Framework** e Consolas, senza asset remoti, moduli o installazioni aggiuntive. Il tracciato del logo SVG è incorporato nel `.ps1` in forma compressa e letto come geometria WPF, senza file esterni; `WindowChrome` mantiene spostamento e ridimensionamento della cornice personalizzata. Richiede un desktop interattivo e un thread **STA** (già impostato dal lancio automatico e dal task al login); per un lancio manuale usare `powershell.exe -STA -File .\MSP-WindowsUpdate.ps1 -Action Monitor`. Stato, log e comando di stop sono gestiti in un runspace del monitor; il `DispatcherTimer` aggiorna i controlli senza attendere file o lock sul thread grafico. Nessuna operazione WUA viene eseguita dalla UI.
+Il monitor usa le librerie WPF di **.NET Framework** e Consolas, senza asset remoti, moduli o installazioni aggiuntive. Il tracciato del logo SVG è incorporato nel `.ps1` in forma compressa e letto come geometria WPF, senza file esterni; `WindowChrome` mantiene spostamento e ridimensionamento della finestra senza bordo visibile. Richiede un desktop interattivo e un thread **STA** (già impostato dal lancio automatico e dal task al login); per un lancio manuale usare `powershell.exe -STA -File .\MSP-WindowsUpdate.ps1 -Action Monitor`. Stato, log e comando di stop sono gestiti in un runspace del monitor; il `DispatcherTimer` aggiorna i controlli senza attendere file o lock sul thread grafico. Nessuna operazione WUA viene eseguita dalla UI.
+
+Il monitor usa etichette, messaggi e riepiloghi in inglese, coerenti con il registro operativo. Titoli degli aggiornamenti ed errori restituiti da Windows mantengono la lingua della sorgente. Non mostra la scritta superiore SPETTRO o l'identificativo di sessione; i conteggi **Installed**, **Errors**, **Excluded**, **Reboots** hanno iniziale maiuscola e icone vettoriali integrate. La finestra resta rettangolare, senza cornice disegnata.
 
 Le righe ricevute dal worker compaiono progressivamente a piccoli gruppi; la coda resta limitata allo snapshot corrente e non inventa eventi. Errori, warning, stop, countdown, riavvii confermati ed esiti conclusivi vengono mostrati senza ritardo di animazione. Il riepilogo finale viene reso integralmente prima della conferma di lettura al worker.
 
-La barra segmentata rappresenta soltanto una percentuale comunicata da WUA; `--` indica un valore non disponibile, anche a lavoro concluso. Le animazioni decorative restano attive in tutte le fasi, nel riepilogo finale e dopo la pulizia dei file runtime; si sospendono soltanto quando la finestra è minimizzata. Non dipendono dall'impostazione delle animazioni di Windows e non modificano tale impostazione. Il movimento dello sfondo non indica che il worker sia ancora operativo: fa fede lo stato mostrato. Il countdown mostra **l'ultimo valore comunicato dal worker**, senza stimare autonomamente il momento del riavvio. La finestra è ridimensionabile, con contenuto scorrevole e comandi sempre visibili; il log è selezionabile/copiabile e non torna in fondo mentre si consultano righe precedenti. `Tab` sposta il focus, `Alt+A` richiede **Arresta**, `Alt+C` chiude solo la finestra. WPF usa unità indipendenti dai pixel; su monitor con DPI diversi lo scaling dipende anche dall'host Windows PowerShell e non viene forzata una modalità DPI del processo. Non sono richiesti effetti GPU: il rendering resta disponibile anche in software/RDP.
+Lo storico delle attività è **solo in memoria**: lo script non crea né aggiorna `activity.log` e non riversa lo storico nei file JSON. Worker e monitor condividono una mappatura non persistente nativa .NET, limitata a **60 righe**, con un massimo di **4096 caratteri per riga** e troncamento esplicito dei messaggi più lunghi. La mappatura è distinta per esecuzione e accessibile a SYSTEM e amministratori; `Global\` consente il collegamento tra il worker di servizio e il desktop. Resta disponibile finché almeno un worker o monitor la mantiene aperta; si perde al riavvio e anche tra due avvii del worker se nel frattempo non resta aperto alcun monitor. Nessun servizio aggiuntivo conserva lo storico. Se la memoria condivisa non è disponibile, il monitor lo segnala, senza creare un log su disco.
+
+La barra segmentata rappresenta soltanto una percentuale comunicata da WUA; `--` indica un valore non disponibile, anche a lavoro concluso. Le animazioni decorative restano attive in tutte le fasi, nel riepilogo finale e dopo la pulizia dei file runtime; si sospendono soltanto quando la finestra è minimizzata. Non dipendono dall'impostazione delle animazioni di Windows e non modificano tale impostazione. Il movimento dello sfondo non indica che il worker sia ancora operativo: fa fede lo stato mostrato. Il countdown mostra **l'ultimo valore comunicato dal worker**, senza stimare autonomamente il momento del riavvio. La finestra è ridimensionabile, con contenuto scorrevole e comandi sempre visibili; il log è selezionabile/copiabile e non torna in fondo mentre si consultano righe precedenti. `Tab` sposta il focus, `Alt+S` richiede **Stop**, `Alt+C` chiude solo la finestra. WPF usa unità indipendenti dai pixel; su monitor con DPI diversi lo scaling dipende anche dall'host Windows PowerShell e non viene forzata una modalità DPI del processo. Non sono richiesti effetti GPU: il rendering resta disponibile anche in software/RDP.
 
 Un secondo task riapre il monitor **al login dello stesso account che ha avviato lo script**, con token interattivo elevato e senza salvare password, finché il lavoro è in corso. A fine lavoro il worker concede al monitor aperto fino a 10 secondi per leggere il risultato, poi rimuove automaticamente i propri file e i due task. La finestra già aperta conserva il riepilogo **in memoria**, fino alla chiusura. Se il lavoro termina senza monitor aperto o senza login, la pulizia avviene comunque: non resta un riepilogo da mostrare al login successivo. Non viene modificato l'accesso automatico di Windows.
 
@@ -93,31 +99,34 @@ Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione p
 
 ## Stato e arresto
 
-Il worker si copia in `C:\ProgramData\MSPTools\WindowsUpdate\MSP-WindowsUpdate.ps1`. Da PowerShell amministrativa:
+Il worker si copia in `C:\ProgramData\DaScript\WindowsUpdate\MSP-WindowsUpdate.ps1`. Da PowerShell amministrativa:
 
 ```powershell
-$script = "$env:ProgramData\MSPTools\WindowsUpdate\MSP-WindowsUpdate.ps1"
+$script = "$env:ProgramData\DaScript\WindowsUpdate\MSP-WindowsUpdate.ps1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Action Status
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Action Monitor
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Action Stop
 ```
 
-`Stop`, disponibile anche con il pulsante **Arresta**, è **cooperativo**: richiede l'annullamento nativo di ricerca/download e attende la conclusione dell'installazione già in corso. Il worker è l'unico autore dello stato operativo; una richiesta non viene presentata come un arresto già completato.
+Il nome storico del file, dei task e dei mutex resta invariato per mantenere compatibilità con URL e protezioni dalle esecuzioni concorrenti. La cartella runtime usa il nome **DaScript**. Se nella precedente cartella `MSPTools\WindowsUpdate` esiste ancora `state.json` o il backup, il nuovo avvio si interrompe prima di creare file o sostituire task: usare la copia del worker in quella cartella per verificare e concludere/arrestare la precedente esecuzione. Non vengono spostati o cancellati automaticamente i suoi file.
+
+`Stop`, disponibile anche con il pulsante **Stop**, è **cooperativo**: richiede l'annullamento nativo di ricerca/download e attende la conclusione dell'installazione già in corso. Il worker è l'unico autore dello stato operativo; una richiesta non viene presentata come un arresto già completato.
 
 Il countdown è gestito dallo script: durante l'attesa lo stop impedisce il riavvio. Il controllo finale e la richiesta di stop usano lo stesso lock; dopo che il riavvio è stato confermato a Windows non se ne promette l'annullamento. Uno stop arrivato dopo quel punto impedisce la ripresa degli aggiornamenti al boot successivo. Lo script non usa `shutdown /a`, quindi non annulla riavvii richiesti da altri processi.
 
-Durante il lavoro i dati si trovano in:
+Durante il lavoro lo stato operativo si trova in:
 
 ```text
-C:\ProgramData\MSPTools\WindowsUpdate\activity.log
-C:\ProgramData\MSPTools\WindowsUpdate\state.json
-C:\ProgramData\MSPTools\WindowsUpdate\state.json.bak
+C:\ProgramData\DaScript\WindowsUpdate\state.json
+C:\ProgramData\DaScript\WindowsUpdate\state.json.bak
 ```
+
+Questi file conservano avanzamento, risultati ed errori necessari a ripresa e riepilogo; non contengono la coda delle attività. Restano anche la copia del worker e i marcatori di controllo previsti dal ciclo operativo. La modifica riguarda il log dello script, non i registri nativi di Windows Update.
 
 Gli stati conclusivi sono:
 
 - `Completed`: nessun altro aggiornamento eleggibile, senza errori aperti o esclusioni.
-- `CompletedWithExclusions`: nessun errore aperto, ma offerte escluse (per esempio driver potenzialmente interattivi) oppure upgrade richiesto non offerto. Le esclusioni non incrementano il conteggio degli errori.
+- `CompletedWithExclusions`: nessun errore aperto, ma offerte escluse (per esempio driver esclusi dall'operatore) oppure upgrade richiesto non offerto. Le esclusioni non incrementano il conteggio degli errori.
 - `CompletedWithErrors`: errori aperti o upgrade offerto e non completato, senza un'esclusione che lo spieghi.
 - `Blocked` e `Stopped`: esecuzione bloccata oppure arrestata dall'operatore.
 
@@ -125,7 +134,7 @@ Le esclusioni descrivono l'ultima scansione riuscita, evitando di mantenere offe
 
 ## Pulizia automatica
 
-A esecuzione conclusa e senza operazioni o riavvii di esito incerto, vengono rimossi i task `MSP-WindowsUpdate` e `MSP-WindowsUpdate-Monitor`, la copia del worker, stato e backup, log, richieste di stop, marcatori e file temporanei della cartella `MSPTools\WindowsUpdate`. Anche la cartella viene rimossa; il contenitore `MSPTools` viene eliminato solo se creato dall'esecuzione e rimasto vuoto. La pulizia non richiede di chiudere il monitor e funziona anche con `-NoMonitor`.
+A esecuzione conclusa e senza operazioni o riavvii di esito incerto, vengono rimossi i task `MSP-WindowsUpdate` e `MSP-WindowsUpdate-Monitor`, la copia del worker, stato e backup, richieste di stop, marcatori e file temporanei della cartella `DaScript\WindowsUpdate`, compreso un eventuale `activity.log` lasciato da versioni precedenti. Anche la cartella viene rimossa; il contenitore `DaScript` viene eliminato solo se creato dall'esecuzione e rimasto vuoto. La pulizia non richiede di chiudere il monitor e funziona anche con `-NoMonitor`.
 
 Lo script non elimina file estranei, directory reindirizzate, il sorgente dell'operatore, la cronologia aggiornamenti, la cache WUA o i registri eventi/audit di Windows. Il bootstrap elimina già il proprio download temporaneo. I mutex nativi usati per la sincronizzazione non lasciano file di lock.
 
@@ -134,7 +143,9 @@ Un'operazione WUA ancora attiva/incerta o un riavvio già confermato impediscono
 ## Politica aggiornamenti
 
 - Rispetta la sorgente configurata dal PC/server e non modifica **WSUS, GPO, MDM** o le policy di Windows Update.
-- **Driver e aggiornamenti facoltativi sono inclusi di default**, compresi firmware/BIOS distribuiti come driver applicabili da WUA. `-ExcludeDrivers` e `-ExcludeOptional` consentono di escluderli; i precedenti `-IncludeDrivers`/`-IncludeOptional` restano accettati. Gli upgrade di versione richiedono `-IncludeFeatureUpgrades` o il consenso specifico per Windows 11; beta e pacchetti che richiedono input restano esclusi.
+- **Driver e aggiornamenti facoltativi sono inclusi di default**, compresi firmware/BIOS distribuiti come driver applicabili da WUA. `-ExcludeDrivers` e `-ExcludeOptional` consentono di escluderli; i precedenti `-IncludeDrivers`/`-IncludeOptional` restano accettati. Gli upgrade di versione richiedono `-IncludeFeatureUpgrades` o il consenso specifico per Windows 11; le beta restano escluse.
+- `InstallationBehavior.CanRequestUserInput` indica solo una possibile interazione: non esclude l'aggiornamento selezionato da download e installazione. `Update may require interactive input` compare nel log come `INFO`. Restano attivi `ForceQuiet` e il divieto di prompt per i sorgenti, senza nuove finestre o conferme. Solo il risultato individuale WUA `Succeeded` (`ResultCode=2`) registra l'installazione come riuscita; gli altri esiti conservano `ResultCode` e `HRESULT`, senza interrompere la lettura degli esiti degli altri aggiornamenti nel batch.
+- Un risultato di installazione `0x8024200A` (`WU_E_UH_CANREQUIREINPUT`) o `0x80240020` (`WU_E_NO_INTERACTIVE_USER`) viene diagnosticato come **Manual intervention required** nel log e negli errori aperti del riepilogo del monitor, senza essere contato come esclusione. `0x80242004` (`WU_E_UH_DOESNOTSUPPORTACTION`) segnala un'azione non supportata, possibile anche quando non è supportata l'installazione silenziosa forzata: richiede verifica dell'operatore, senza dedurre con certezza una richiesta di input. Tentativi, riavvii e gestione degli errori restano invariati.
 - Non gestisce Microsoft Store, WinGet, applicazioni di terze parti o firmware fuori da WUA.
 - Il successo WUA descrive il pacchetto installato; non è una certificazione universale dell'avvenuto flash del BIOS. Il firmware deve essere pubblicato dal produttore per quel dispositivo. Alimentazione e requisiti di applicazione del firmware restano vincoli del dispositivo.
 - Limiti predefiniti: **8 riavvii**, **3 tentativi per aggiornamento**, **3 errori generali consecutivi**, **30 passaggi per worker** e **7 giorni** per esecuzione. Retry periodico ogni **15 minuti**; riavvio richiesto con **90 secondi** di preavviso.
@@ -156,6 +167,10 @@ powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootstrapConsent.ps
 if ($LASTEXITCODE -ne 0) { throw 'Bootstrap consent checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateSelection.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Selection checks failed' }
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateInstallation.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Installation checks failed' }
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-MemoryLog.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Memory log checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateLifecycle.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Lifecycle checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UwfDetection.ps1
@@ -170,7 +185,11 @@ if ($LASTEXITCODE -ne 0) { throw 'WPF checks failed' }
 
 Il controllo UWF include query CIM in sola lettura: verifica gli errori reali di classe/namespace assenti e distingue `NativeErrorCode` dal valore numerico di `StatusCode`. Errori di accesso o del provider restano bloccanti.
 
-`Test-Monitor.ps1` verifica XAML, controlli WPF, stati sintetici e lettura asincrona su file temporanei, senza elevazione, aggiornamenti, task reali, riavvii o audio. Aggiungere `-Preview` per aprire la UI con dati sintetici; anche il pulsante Arresta agisce soltanto sui file temporanei del test. Sono stati verificati su Windows PowerShell 5.1 il rendering della finestra, il ridimensionamento a 640×480, il rendering WPF a 96/192 DPI e gli eventi di stop/chiusura con polling e riepilogo finale. Il rendering a DPI diversi non equivale a un collaudo del cambio monitor o di una sessione RDP.
+`Test-MemoryLog.ps1` verifica la memoria condivisa con un processo di lettura separato, la coda limitata, Unicode, il troncamento, la conservazione finché esiste un lettore e la perdita dello storico alla chiusura dell'ultimo accesso. Controlla inoltre che non venga creato un file di log. I test usano nomi `Local\` isolati; il collegamento fra sessione SYSTEM e desktop è progettato sulle API Microsoft.
+
+`Test-UpdateInstallation.ps1` usa oggetti WUA sintetici per verificare il percorso selezione/download/`BeginInstall` con `CanRequestUserInput=true`, successo individuale, diagnostica dell'intervento manuale, batch con esiti misti e risoluzione degli errori dopo un retry riuscito. Non installa aggiornamenti reali.
+
+`Test-Monitor.ps1` verifica XAML, controlli WPF, stati sintetici e lettura asincrona su file temporanei, senza elevazione, aggiornamenti, task reali, riavvii o audio. Aggiungere `-Preview` per aprire la UI con dati sintetici; anche il pulsante Stop agisce soltanto sui file temporanei del test. Sono stati verificati su Windows PowerShell 5.1 il rendering della finestra, il ridimensionamento a 640×480, il rendering WPF a 96/192 DPI e gli eventi di stop/chiusura con polling e riepilogo finale. Il rendering a DPI diversi non equivale a un collaudo del cambio monitor o di una sessione RDP.
 
 Casi di collaudo consigliati, su sistemi rappresentativi:
 
@@ -190,6 +209,10 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 - [PowerShell: modalità NonInteractive](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1#-noninteractive)
 - [Windows Update Agent API](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/portal-client)
 - [Ricerca, download e installazione con WUA](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/searching--downloading--and-installing-updates)
+- [Significato di CanRequestUserInput](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-iinstallationbehavior-get_canrequestuserinput)
+- [Installazione silenziosa con ForceQuiet](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-iupdateinstaller2-get_forcequiet)
+- [Codici di errore Windows Update](https://learn.microsoft.com/en-us/windows/deployment/update/windows-update-error-reference)
+- [Esiti individuali OperationResultCode](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/ne-wuapi-operationresultcode)
 - [Scheduled Tasks PowerShell](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/register-scheduledtask)
 - [Aggiornamenti di dispositivi protetti da UWF](https://learn.microsoft.com/en-us/windows/configuration/unified-write-filter/uwf-apply-windows-updates)
 - [Rilevamento Server Core](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/legacy/ee391629(v=vs.85))
@@ -200,6 +223,9 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 - [Contesti di sicurezza delle attività pianificate](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
 - [Lettura dell'ultimo avvio tramite WMI](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-tasks--desktop-management)
 - [Mutex nativi .NET](https://learn.microsoft.com/en-us/dotnet/api/system.threading.mutex?view=netframework-4.8.1)
+- [Memoria condivisa non persistente .NET](https://learn.microsoft.com/en-us/dotnet/standard/io/memory-mapped-files)
+- [CreateOrOpen e permessi .NET Framework](https://learn.microsoft.com/en-us/dotnet/api/system.io.memorymappedfiles.memorymappedfile.createoropen?view=netframework-4.8.1)
+- [Oggetti kernel tra sessioni Windows](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
 - [Unregister-ScheduledTask](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/unregister-scheduledtask)
 - [WPF DispatcherTimer](https://learn.microsoft.com/en-us/dotnet/api/system.windows.threading.dispatchertimer?view=netframework-4.8)
 - [Threading WPF](https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/threading-model)

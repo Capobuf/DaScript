@@ -27,7 +27,10 @@ $testBase = Join-Path ([IO.Path]::GetTempPath()) ('DaScript-monitor-tests-' + [G
 $script:Root = $testBase
 $script:StatePath = Join-Path $testBase 'state.json'
 $script:BackupPath = Join-Path $testBase 'state.json.bak'
-$script:LogPath = Join-Path $testBase 'activity.log'
+$script:LogNamePrefix = 'Local\DaScript-monitor-log-'
+$script:MemoryLog = $null
+$script:MemoryLogRunId = ''
+$script:MemoryLogError = ''
 $script:StopPath = Join-Path $testBase 'stop.request'
 $script:NotificationPath = Join-Path $testBase 'completion-notified'
 $script:ResultReadPath = Join-Path $testBase 'result-read'
@@ -37,7 +40,7 @@ $script:MonitorRunId = ''
 $script:TerminalStates = @('Completed','CompletedWithExclusions','CompletedWithErrors','Blocked','Stopped')
 $state = [pscustomobject]@{
     RunId=[Guid]::NewGuid().ToString('N'); Status='Running'; Phase='Install'
-    Message='Install 42%: Aggiornamento cumulativo per Windows - anteprima con dati sintetici'
+    Message='Install 42%: Windows cumulative update - synthetic preview'
     UpdatedUtc=[DateTime]::UtcNow.ToString('o'); Scans=2; Reboots=1
     Installed=@([pscustomobject]@{Title='Synthetic update'})
     Failures=@(); Skipped=@()
@@ -47,9 +50,13 @@ $state.ProgressPercent = 42
 $state.ActiveOperation = 'Install'
 $window = $null
 $reader = $null
+$logOwner = $null
 try {
+    # Default creator ACL keeps this isolated preview usable without elevation.
+    $logOwner = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew($script:LogNamePrefix + $state.RunId, 1MB)
+    Initialize-MemoryLog $state.RunId
     $sampleLog = @'
-2026-01-01 10:00:00 [INFO] PREVIEW: dati sintetici, nessuna operazione sul sistema.
+2026-01-01 10:00:00 [INFO] PREVIEW: synthetic data, no system changes.
 2026-01-01 10:00:01 [INFO] Queued for installation.
 2026-01-01 10:00:02 [INFO] Scanning for updates (scan 1).
 2026-01-01 10:00:03 [INFO] Found 1 update(s); processing 1.
@@ -58,13 +65,13 @@ try {
 2026-01-01 10:00:06 [INFO] Synthetic reboot and resume; no restart executed.
 2026-01-01 10:00:07 [INFO] Scanning for updates (scan 2).
 2026-01-01 10:00:08 [INFO] Found 1 update(s); processing 1.
-2026-01-01 10:00:09 [INFO] Download 100%: Aggiornamento cumulativo di prova
+2026-01-01 10:00:09 [INFO] Download 100%: Synthetic cumulative update
 2026-01-01 10:00:10 [INFO] Installing 1 update(s).
-2026-01-01 10:00:11 [INFO] Install 0%: Aggiornamento cumulativo di prova
-2026-01-01 10:00:12 [INFO] Install 21%: Aggiornamento cumulativo di prova
-2026-01-01 10:00:13 [INFO] Install 42%: Aggiornamento cumulativo di prova
+2026-01-01 10:00:11 [INFO] Install 0%: Synthetic cumulative update
+2026-01-01 10:00:12 [INFO] Install 21%: Synthetic cumulative update
+2026-01-01 10:00:13 [INFO] Install 42%: Synthetic cumulative update
 '@
-    [IO.File]::WriteAllText($script:LogPath, $sampleLog + "`r`n", [Text.Encoding]::UTF8)
+    foreach ($line in ($sampleLog -split '\r?\n')) { Write-Log ($line -replace '^.*?\[INFO\] ', '') }
     Save-State $state
     $window = New-MonitorWindow
     Assert-True ($window -is [Windows.Window]) 'XAML did not produce a WPF Window.'
@@ -136,7 +143,7 @@ try {
     $state.RebootCommitted = $false
     $snapshot.StopRequested = $true
     Update-MonitorView $window $snapshot
-    Assert-True (-not $window.FindName('StopButton').IsEnabled -and $window.FindName('NoticeText').Text -like 'Stop richiesto*') 'Stop request was not represented as pending.'
+    Assert-True (-not $window.FindName('StopButton').IsEnabled -and $window.FindName('NoticeText').Text -like 'Stop requested*') 'Stop request was not represented as pending.'
     $snapshot.StopRequested = $false
     $state.ActiveOperation = ''
     foreach ($status in $script:TerminalStates) {
@@ -152,16 +159,19 @@ try {
     $state.Status = 'Blocked'
     $state.ActiveOperation = 'Install'
     Update-MonitorView $window $snapshot
-    Assert-True ($window.FindName('NoticeText').Text -like '*potrebbe essere ancora attiva*') 'Blocked active WUA operation was presented as finished.'
+    Assert-True ($window.FindName('NoticeText').Text -like '*may still be active*') 'Blocked active WUA operation was presented as finished.'
     $state.CleanupError = 'Synthetic cleanup error'
     Update-MonitorView $window $snapshot
-    Assert-True ($window.FindName('NoticeText').Text -like 'Pulizia incompleta:*') 'Cleanup error was hidden.'
+    Assert-True ($window.FindName('NoticeText').Text -like 'Cleanup incomplete:*') 'Cleanup error was hidden.'
     $state.CleanupError = ''
     $state.ActiveOperation = ''
     $state.Status = 'CompletedWithErrors'
     $state.Phase = 'CompletedWithErrors'
-    $state.Failures = @([pscustomobject]@{Title='Synthetic failure'; Reason='Synthetic reason'; Resolved=$false})
-    $state.Skipped = @([pscustomobject]@{Title='Synthetic exclusion'; Reason='Requires interactive input'})
+    $state.Failures = @(
+        [pscustomobject]@{Title='Synthetic failure'; Reason='Synthetic reason'; Resolved=$false}
+        [pscustomobject]@{Title='Synthetic input required'; Reason='Result=4; HRESULT=0x8024200A; WU_E_UH_CANREQUIREINPUT: Manual intervention required.'; Resolved=$false}
+    )
+    $state.Skipped = @([pscustomobject]@{Title='Synthetic exclusion'; Reason='Driver excluded by operator'})
     Save-State $state
     $reader = New-MonitorReader
     [void]$reader.AddCommand('Get-MonitorSnapshot').AddParameter('RunId',$state.RunId)
@@ -176,11 +186,14 @@ try {
     $result = @($reader.EndInvoke($pending))
     if ($reader.HadErrors) { throw ($reader.Streams.Error | Out-String) }
     $result = $result[-1]
+    Assert-True ($result.Log -like '*PREVIEW: synthetic data*') 'Background reader lost shared in-memory history.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $testBase 'activity.log'))) 'Monitor test wrote an activity log to disk.'
     Assert-True ($result.Finished -and $result.Log -like '*Synthetic failure: Synthetic reason*' -and $result.Log -like '*Synthetic exclusion*') 'Final snapshot omitted outcome details.'
+    Assert-True ($result.Log -like '*OPEN ERRORS:*Synthetic input required: Result=4; HRESULT=0x8024200A;*Manual intervention required.*') 'Final snapshot hid the actual interaction failure.'
     Assert-True (-not [IO.File]::Exists($script:ResultReadPath)) 'Result acknowledged before UI consumption.'
     Update-MonitorView $window $result
     Assert-True ($window.FindName('LogText').Text -ceq $result.Log) 'Final result was acknowledged before the complete log was displayed.'
-    Assert-True ($window.FindName('FailureCount').Text -eq '1') 'Open failure counter is incorrect.'
+    Assert-True ($window.FindName('FailureCount').Text -eq '2' -and $window.FindName('SkippedCount').Text -eq '1') 'An actual interaction failure was counted as an exclusion.'
     $reader.Commands.Clear()
     [void]$reader.AddCommand('Get-MonitorSnapshot').AddParameter('RunId',$state.RunId).AddParameter('AcknowledgeFinal',$true)
     $null = $reader.Invoke()
@@ -193,7 +206,7 @@ try {
     $state.Status = 'Running'
     $state.Phase = 'Install'
     $state.ActiveOperation = 'Install'
-    $state.Message = 'Install 42%: Aggiornamento cumulativo per Windows - anteprima con dati sintetici'
+    $state.Message = 'Install 42%: Windows cumulative update - synthetic preview'
     $state.ProgressPercent = 42
     $state.Failures = @()
     $state.Skipped = @()
@@ -204,6 +217,9 @@ try {
     if ($reader.HadErrors) { throw ($reader.Streams.Error | Out-String) }
     Assert-True ($stopped.StopRequested -and (Get-State).Status -eq 'Running') 'UI stop changed worker state.'
     [IO.File]::Delete($script:StopPath)
+    $reader.Commands.Clear()
+    [void]$reader.AddCommand('Close-MemoryLog')
+    $null = $reader.Invoke()
     $reader.Dispose()
     $reader = $null
     $window.Close()
@@ -212,7 +228,14 @@ try {
     if ($Preview) { Invoke-Monitor }
 } finally {
     if ($null -ne $window) { $window.Close() }
-    if ($null -ne $reader) { $reader.Dispose() }
+    if ($null -ne $reader) {
+        $reader.Commands.Clear()
+        [void]$reader.AddCommand('Close-MemoryLog')
+        $null = $reader.Invoke()
+        $reader.Dispose()
+    }
+    Close-MemoryLog
+    if ($null -ne $logOwner) { $logOwner.Dispose() }
     $resolved = [IO.Path]::GetFullPath($testBase)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     if ($resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and

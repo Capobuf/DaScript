@@ -53,11 +53,14 @@ function Play-CompletionSound { $script:sounds++ }
 function Start-Sleep { param($Seconds, $Milliseconds) if ($script:sleepHook) { & $script:sleepHook } }
 $testBase = Join-Path ([IO.Path]::GetTempPath()) ('DaScript-tests-' + [Guid]::NewGuid().ToString('N'))
 $originalProgramData = $env:ProgramData
-$script:Root = Join-Path $testBase 'MSPTools\WindowsUpdate'
+$script:Root = Join-Path $testBase 'DaScript\WindowsUpdate'
 [void][IO.Directory]::CreateDirectory($script:Root)
 $script:StatePath = Join-Path $script:Root 'state.json'
 $script:BackupPath = Join-Path $script:Root 'state.json.bak'
-$script:LogPath = Join-Path $script:Root 'activity.log'
+$script:LogNamePrefix = 'Local\DaScript-lifecycle-log-' + [Guid]::NewGuid().ToString('N') + '-'
+$script:MemoryLog = $null
+$script:MemoryLogRunId = ''
+$script:MemoryLogError = ''
 $script:StopPath = Join-Path $script:Root 'stop.request'
 $script:ControlLockName = 'Local\DaScript-tests-control-' + [Guid]::NewGuid().ToString('N')
 $script:WorkerLockName = 'Local\DaScript-tests-worker-' + [Guid]::NewGuid().ToString('N')
@@ -87,6 +90,7 @@ function New-TestState {
         ConsecutiveErrors=0; MaxAttempts=3; LastError=''
     }
     Initialize-RuntimeState $state
+    Initialize-MemoryLog $state.RunId
     $state.RebootDelaySeconds = 0
     Save-State $state
     return $state
@@ -179,11 +183,11 @@ try {
     [IO.File]::WriteAllText($script:StopPath, 'stop')
     Invoke-WorkerCore
     Assert-True ((Get-State).Status -eq 'Stopped' -and -not (Get-State).ActiveOperation) 'Confirmed reboot did not clear the old operation before applying stop.'
-    Assert-True ((Get-Content -LiteralPath $script:LogPath -Raw) -like '*Previous Scan was not finalized*new Windows boot confirmed*') 'Recovery diagnostic omitted the interrupted operation and boot evidence.'
+    Assert-True ((Read-MemoryLog) -like '*Previous Scan was not finalized*new Windows boot confirmed*') 'Recovery diagnostic omitted the interrupted operation and boot evidence.'
 
     $platform = [pscustomobject]@{IsWindows11=$true}
     $state = New-TestState
-    $state.Skipped = @([pscustomobject]@{Title='Interactive driver'; Reason='Update may require interactive input'})
+    $state.Skipped = @([pscustomobject]@{Title='Excluded driver'; Reason='Driver excluded by operator'})
     Complete-UpdateRun $state $platform
     Assert-True ($state.Status -eq 'CompletedWithExclusions' -and $state.Message -like '*failures=0, excluded=1*') 'Exclusions were classified as errors.'
     $state.Failures = @([pscustomobject]@{Resolved=$false})
@@ -315,8 +319,30 @@ try {
     $script:sleepHook = { $script:monitorWaits++ }
     Invoke-Worker
     Assert-True ($script:monitorWaits -eq 10 -and -not (Test-Path -LiteralPath $script:Root)) 'An absent monitor prevented bounded automatic cleanup.'
+    # Exercise the real startup guard before it can create a directory or replace tasks.
+    # AST-loaded functions have no source path; supply the existing test worker path.
+    Set-Item Function:Invoke-Start ([scriptblock]::Create((Get-Item Function:Invoke-Start).Definition.Replace('$PSCommandPath', '$script:WorkerPath')))
+    function Get-SupportedPlatform { return [pscustomobject]@{ IsServer=$false } }
+    function Test-UwfEnabled { return $false }
+    function Initialize-Directory { throw 'Test reached directory initialization.' }
+    $NoMonitor = $true
+    $legacyRoot = Join-Path $testBase 'MSPTools\WindowsUpdate'
+    [void][IO.Directory]::CreateDirectory($legacyRoot)
+    foreach ($name in @('state.json', 'state.json.bak')) {
+        $path = Join-Path $legacyRoot $name
+        [IO.File]::WriteAllText($path, 'unreadable previous state')
+        $message = ''
+        try { Invoke-Start } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like 'Previous runtime state found*') ('Startup ignored previous runtime state: ' + $message)
+        Assert-True ([IO.File]::ReadAllText($path) -eq 'unreadable previous state') 'Startup modified previous runtime state.'
+        [IO.File]::Delete($path)
+    }
+    $message = ''
+    try { Invoke-Start } catch { $message = $_.Exception.Message }
+    Assert-True ($message -eq 'Test reached directory initialization.') 'An empty legacy directory prevented startup.'
     Write-Output ("PASS: $script:checks lifecycle checks (synthetic jobs; native task definitions, temporary state/locks; no updates, restarts, registered tasks or audio).")
 } finally {
+    Close-MemoryLog
     $env:ProgramData = $originalProgramData
     # Delete only files created in this test's verified temporary directory.
     $resolved = [IO.Path]::GetFullPath($testBase)

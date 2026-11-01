@@ -47,12 +47,15 @@ $ErrorActionPreference = 'Stop'
 
 $script:TaskName = 'MSP-WindowsUpdate'
 $script:MonitorTaskName = 'MSP-WindowsUpdate-Monitor'
-$script:Root = Join-Path $env:ProgramData 'MSPTools\WindowsUpdate'
+$script:Root = Join-Path $env:ProgramData 'DaScript\WindowsUpdate'
 $script:WorkerPath = Join-Path $script:Root 'MSP-WindowsUpdate.ps1'
 $script:StatePath = Join-Path $script:Root 'state.json'
 $script:BackupPath = Join-Path $script:Root 'state.json.bak'
 $script:StopPath = Join-Path $script:Root 'stop.request'
-$script:LogPath = Join-Path $script:Root 'activity.log'
+$script:LogNamePrefix = 'Global\MSP-WindowsUpdate-Log-'
+$script:MemoryLog = $null
+$script:MemoryLogRunId = ''
+$script:MemoryLogError = ''
 $script:ControlLockName = 'Global\MSP-WindowsUpdate-Control'
 $script:WorkerLockName = 'Global\MSP-WindowsUpdate-Worker'
 $script:NotificationPath = Join-Path $script:Root 'completion-notified'
@@ -296,10 +299,74 @@ function Test-UwfEnabled {
     return (@($uwf | Where-Object { [bool]$_.CurrentEnabled }).Count -gt 0)
 }
 
+function Close-MemoryLog {
+    if ($null -ne $script:MemoryLog) { $script:MemoryLog.Dispose() }
+    $script:MemoryLog = $null
+    $script:MemoryLogRunId = ''
+    $script:MemoryLogError = ''
+}
+
+function Initialize-MemoryLog {
+    param([string]$RunId, [switch]$ReadOnly)
+    if ($script:MemoryLogRunId -eq $RunId -and $null -ne $script:MemoryLog) { return }
+    Close-MemoryLog
+    $script:MemoryLogRunId = $RunId
+    try {
+        $name = $script:LogNamePrefix + $RunId
+        if ($ReadOnly) {
+            $script:MemoryLog = [IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting(
+                $name, [IO.MemoryMappedFiles.MemoryMappedFileRights]::Read)
+        } else {
+            $security = [IO.MemoryMappedFiles.MemoryMappedFileSecurity]::new()
+            foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+                $security.AddAccessRule([Security.AccessControl.AccessRule[IO.MemoryMappedFiles.MemoryMappedFileRights]]::new(
+                    [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
+            }
+            # A named, non-persisted mapping connects SYSTEM and the elevated monitor across sessions.
+            $script:MemoryLog = [IO.MemoryMappedFiles.MemoryMappedFile]::CreateOrOpen(
+                $name, 1MB, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::ReadWrite,
+                [IO.MemoryMappedFiles.MemoryMappedFileOptions]::None, $security, [IO.HandleInheritability]::None)
+        }
+    } catch [IO.FileNotFoundException] {
+        $script:MemoryLogError = 'No in-memory activity log is available. Waiting for the worker; previous history may have been released.'
+    } catch {
+        $script:MemoryLogError = 'In-memory activity log unavailable: ' + $_.Exception.Message
+        if (-not $ReadOnly) { Write-Warning $script:MemoryLogError }
+    }
+}
+
+function Read-MemoryLog {
+    # Callers hold the control mutex, including while writing the length-prefixed UTF-8 string.
+    if ($null -eq $script:MemoryLog) { return $script:MemoryLogError }
+    $stream = $script:MemoryLog.CreateViewStream(0, 0, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read)
+    try {
+        $reader = [IO.BinaryReader]::new($stream, [Text.Encoding]::UTF8)
+        try { return $reader.ReadString() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, ($Message -replace '[\r\n]+', ' ')
-    [IO.File]::AppendAllText($script:LogPath, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    if ($null -eq $script:MemoryLog) { Write-Verbose $line; return }
+    # Bound the tail to 60 lines of at most 4096 characters, safely below the 1 MiB capacity.
+    if ($line.Length -gt 4096) { $line = $line.Substring(0, 4080) + ' ... [truncated]' }
+    $control = $null
+    try {
+        $control = Enter-RunLock $script:ControlLockName
+        $previous = Read-MemoryLog
+        $lines = @()
+        if ($previous) { $lines = @($previous -split '\r?\n' | Select-Object -Last 59) }
+        $text = (@($lines) + @($line)) -join "`r`n"
+        $stream = $script:MemoryLog.CreateViewStream(0, 0, [IO.MemoryMappedFiles.MemoryMappedFileAccess]::Write)
+        try {
+            $writer = [IO.BinaryWriter]::new($stream, [Text.Encoding]::UTF8)
+            try { $writer.Write([string]$text) } finally { $writer.Dispose() }
+        } finally { $stream.Dispose() }
+    } catch {
+        # Logging must neither write a disk fallback nor interrupt an update operation.
+        Write-Warning ('In-memory activity log write failed: ' + $_.Exception.Message)
+    } finally { Exit-RunLock $control }
 }
 
 function Save-State {
@@ -486,7 +553,7 @@ function Remove-RunArtifacts {
         if ($current.Status -notin $script:TerminalStates -or $current.ActiveOperation -or $current.RebootCommitted) { return }
         $State.CleanupError = ''
         $root = [IO.Path]::GetFullPath($script:Root).TrimEnd('\')
-        $expected = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'MSPTools\WindowsUpdate')).TrimEnd('\')
+        $expected = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'DaScript\WindowsUpdate')).TrimEnd('\')
         if ($root -ne $expected) { throw 'Cleanup refused an unexpected runtime directory.' }
         $parent = [IO.Directory]::GetParent($root).FullName
         foreach ($path in @($parent, $root)) {
@@ -536,7 +603,7 @@ function Test-StopRequested {
 }
 
 function Invoke-SystemRestart {
-    & "$env:SystemRoot\System32\shutdown.exe" /r /t 0 /f /d p:2:17 /c 'MSP Windows Update: restart to continue installing updates.' | Out-Null
+    & "$env:SystemRoot\System32\shutdown.exe" /r /t 0 /f /d p:2:17 /c 'DaScript Windows Update: restart to continue installing updates.' | Out-Null
     return $LASTEXITCODE
 }
 
@@ -653,10 +720,6 @@ function Get-Candidates {
                 continue
             }
         }
-        if ([bool]$update.InstallationBehavior.CanRequestUserInput) {
-            Add-Skipped $State $id $title 'Update may require interactive input'
-            continue
-        }
         $previous = Get-Failure $State $id
         if ($null -ne $previous -and [int]$previous.Attempts -ge [int]$State.MaxAttempts) {
             continue
@@ -680,6 +743,9 @@ function Install-Batch {
     foreach ($update in $Candidates) {
         $id = Get-UpdateId $update
         try {
+            if ([bool]$update.InstallationBehavior.CanRequestUserInput) {
+                Write-Log ("Update may require interactive input; attempting normal unattended installation: $($update.Title)") 'INFO'
+            }
             if (-not [bool]$update.EulaAccepted) { $update.AcceptEula() }
             [void]$downloadCollection.Add($update)
         } catch {
@@ -738,7 +804,21 @@ function Install-Batch {
             Resolve-Failure $State $id
             Write-Log ("Installed: $title")
         } else {
-            Add-Failure $State $id $title 'Install' ("Result=$($result.ResultCode); HRESULT=$(Format-HResult $result.HResult)")
+            $hresult = Format-HResult $result.HResult
+            $reason = "Result=$($result.ResultCode); HRESULT=$hresult"
+            # Diagnose actual WUA results, never infer failure from CanRequestUserInput.
+            switch ($hresult) {
+                '0x8024200A' {
+                    $reason += '; WU_E_UH_CANREQUIREINPUT: Manual intervention required. WUA could not install this update because it requires user input in the current execution context.'
+                }
+                '0x80240020' {
+                    $reason += '; WU_E_NO_INTERACTIVE_USER: Manual intervention required. WUA could not complete installation because no interactive user is logged on.'
+                }
+                '0x80242004' {
+                    $reason += '; WU_E_UH_DOESNOTSUPPORTACTION: WUA rejected the requested installation action. This can occur when an update does not support forced silent installation; operator review required.'
+                }
+            }
+            Add-Failure $State $id $title 'Install' $reason
         }
     }
     Save-State $State
@@ -757,6 +837,7 @@ function Invoke-WorkerCore {
     $state = Get-State
     if ($null -eq $state) { throw 'State file is missing.' }
     Initialize-RuntimeState $state
+    Initialize-MemoryLog $state.RunId
     if ($state.Status -in $script:TerminalStates) { return }
     try {
         $bootId = Get-BootId
@@ -926,6 +1007,13 @@ function Invoke-Start {
     $control = $null
     $state = $null
     try {
+        # Keep the existing mutex/task names so older workers cannot run alongside this version.
+        $legacyRoot = Join-Path $env:ProgramData 'MSPTools\WindowsUpdate'
+        foreach ($name in @('state.json', 'state.json.bak')) {
+            if (Test-Path -LiteralPath (Join-Path $legacyRoot $name)) {
+                throw "Previous runtime state found in $legacyRoot. Use its worker to check status and finish or stop that run before starting this version."
+            }
+        }
         $parentCreated = -not (Test-Path -LiteralPath (Split-Path -Parent $script:Root))
         Initialize-Directory
         $previous = Get-State
@@ -977,6 +1065,7 @@ function Invoke-Start {
             Installed=@(); Skipped=@(); Failures=@()
         }
         Save-State $state
+        Initialize-MemoryLog $state.RunId
         Write-Log ("Windows 11 upgrade requested: $upgradeRequested")
         Write-Log ("Started $($state.RunId); platform=$($state.PlatformCaption) $($state.PlatformVersion); server=$($state.IsServer); drivers=$($state.IncludeDrivers); optional=$($state.IncludeOptional); upgrades=$($state.IncludeFeatureUpgrades)")
 
@@ -1013,7 +1102,7 @@ function Invoke-Start {
         Exit-RunLock $startupLock
     }
     Start-ScheduledTask -TaskName $script:TaskName
-    Write-Host ('Started. Logs: ' + $script:LogPath)
+    Write-Host 'DaScript Windows Update started. No activity logs are saved to disk; history is available only in the monitor.'
     if ($monitorArguments) {
         Start-Process -FilePath $psExe -ArgumentList $monitorArguments -WindowStyle Hidden | Out-Null
     }
@@ -1022,7 +1111,7 @@ function Invoke-Start {
 function Show-Status {
     $state = Get-State
     if ($null -eq $state) {
-        Write-Host 'No MSP Windows Update run found.'
+        Write-Host 'No DaScript Windows Update run found.'
         return
     }
     Initialize-RuntimeState $state
@@ -1036,7 +1125,7 @@ function Show-Status {
         Windows11Upgrade=$state.Windows11UpgradeStatus
         ActiveOperation=$state.ActiveOperation; ProgressPercent=$state.ProgressPercent
         StartedUtc=$state.StartedUtc; UpdatedUtc=$state.UpdatedUtc
-        Log=$script:LogPath; CleanupError=$state.CleanupError
+        Log='Memory only (monitor)'; CleanupError=$state.CleanupError
     } | Format-List | Out-Host
 }
 
@@ -1832,7 +1921,7 @@ function New-MonitorWindow {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        Title="SPETTRO // Windows Update" Width="900" Height="540" MinWidth="640" MinHeight="480"
+        Title="Windows Update" Width="900" Height="540" MinWidth="640" MinHeight="480"
         WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
         Background="#090B09" Foreground="#E5C56C" FontFamily="Consolas" FontSize="13"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
@@ -1917,7 +2006,7 @@ function New-MonitorWindow {
       </ControlTemplate></Setter.Value></Setter>
     </Style>
   </Window.Resources>
-  <Border BorderBrush="#6E5C2A" BorderThickness="1">
+  <Border x:Name="WindowSurface" BorderThickness="0">
     <Grid>
       <Grid.RowDefinitions><RowDefinition Height="23"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <Grid x:Name="AmbientField" Grid.RowSpan="3" ClipToBounds="True" IsHitTestVisible="False">
@@ -1944,47 +2033,57 @@ function New-MonitorWindow {
       </Grid>
       <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock Text="// SPETTRO" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="12,0"/>
-        <Button x:Name="MinimizeButton" Grid.Column="1" Content="_" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Riduci a icona"/>
-        <Button x:Name="MaximizeButton" Grid.Column="2" Content="[]" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Ingrandisci o ripristina"/>
-        <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Chiudi finestra"/>
+        <Button x:Name="MinimizeButton" Grid.Column="1" Content="_" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Minimize"/>
+        <Button x:Name="MaximizeButton" Grid.Column="2" Content="[]" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Maximize or restore"/>
+        <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Close window"/>
       </Grid>
       <ScrollViewer Grid.Row="1" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <Grid MinHeight="380" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-          <TextBlock x:Name="RunText" FontSize="10" Foreground="#8F7F4A" Margin="0,1,0,2"/>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
 
-          <WrapPanel Grid.Row="1" Margin="0,2,0,1">
+          <WrapPanel Grid.Row="0" Margin="0,2,0,1">
             <TextBlock Text="&gt; " Foreground="{StaticResource Muted}"/>
-            <TextBlock x:Name="PhaseText" Text="IN ATTESA" FontWeight="Bold"/>
+            <TextBlock x:Name="PhaseText" Text="WAITING" FontWeight="Bold"/>
             <TextBlock Text="   [" Foreground="{StaticResource Muted}"/>
-            <TextBlock x:Name="StatusText" Text="LETTURA STATO"/>
+            <TextBlock x:Name="StatusText" Text="READING STATUS"/>
             <TextBlock Text="]   " Foreground="{StaticResource Muted}"/>
             <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
             <TextBlock Text="  "/>
-            <TextBlock x:Name="ProgressCaption" Text="NON DISPONIBILE" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Bottom"/>
+            <TextBlock x:Name="ProgressCaption" Text="UNAVAILABLE" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Bottom"/>
           </WrapPanel>
-          <StackPanel Grid.Row="2">
+          <StackPanel Grid.Row="1">
             <Grid Height="5" Width="274" HorizontalAlignment="Left" Margin="13,2,0,3">
-              <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="Avanzamento operazione WUA"/>
+              <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="Update operation progress"/>
               <Border x:Name="Activity" Background="{StaticResource Accent}" Width="7" HorizontalAlignment="Left" Visibility="Collapsed"/>
             </Grid>
             <TextBlock x:Name="PhaseDetail" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
             <WrapPanel Margin="0,2,0,2" TextElement.FontSize="12" TextElement.Foreground="{StaticResource Muted}">
-              <TextBlock Text="installati: "/><TextBlock x:Name="InstalledCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
-              <TextBlock Text="errori: "/><TextBlock x:Name="FailureCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
-              <TextBlock Text="esclusi: "/><TextBlock x:Name="SkippedCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
-              <TextBlock Text="riavvii: "/><TextBlock x:Name="RebootCount" Text="--" Foreground="{StaticResource Ink}"/>
+              <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
+                <Path Data="M1,6 L4,9 L11,1" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <TextBlock Text="Installed: "/><TextBlock x:Name="InstalledCount" Text="--" Foreground="{StaticResource Ink}"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
+                <Path Data="M6,0 L12,11 L0,11 Z M6,3 L6,7 M6,8.5 L6,9.5" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <TextBlock Text="Errors: "/><TextBlock x:Name="FailureCount" Text="--" Foreground="{StaticResource Ink}"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
+                <Path Data="M6,1 A5,5 0 1 1 6,11 A5,5 0 1 1 6,1 M2.5,9.5 L9.5,2.5" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <TextBlock Text="Excluded: "/><TextBlock x:Name="SkippedCount" Text="--" Foreground="{StaticResource Ink}"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <Path Data="M10,4 A5,5 0 1 0 11,8 M10,0 L10,4 L6,4" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <TextBlock Text="Reboots: "/><TextBlock x:Name="RebootCount" Text="--" Foreground="{StaticResource Ink}"/>
+              </StackPanel>
             </WrapPanel>
           </StackPanel>
-          <ScrollViewer Grid.Row="3" MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
-            <TextBlock x:Name="DetailText" Text="Lettura stato..." TextWrapping="Wrap"/>
+          <ScrollViewer Grid.Row="2" MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
+            <TextBlock x:Name="DetailText" Text="Reading status..." TextWrapping="Wrap"/>
           </ScrollViewer>
-          <TextBlock Grid.Row="4" Text="&gt;&gt; activity.log --tail 60" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
-          <Grid x:Name="TerminalField" Grid.Row="5" ClipToBounds="True" MinHeight="110">
+          <TextBlock Grid.Row="3" Text="&gt;&gt; Activity // Memory only // Latest 60 lines" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
+          <Grid x:Name="TerminalField" Grid.Row="4" ClipToBounds="True" MinHeight="110">
             <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
                    FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
-                   HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Registro attivita e riepilogo" SelectionBrush="#8D783B"/>
+                   HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
             <TextBlock x:Name="TearNoise" Text="___//__    ::  ||| /   _  ::::    ///____  |:|   __//__" Foreground="#F0CD67" FontSize="11" Opacity="0" IsHitTestVisible="False" HorizontalAlignment="Right" VerticalAlignment="Top">
               <TextBlock.RenderTransform><TranslateTransform x:Name="TearNoiseShift"/></TextBlock.RenderTransform>
             </TextBlock>
@@ -1993,13 +2092,13 @@ function New-MonitorWindow {
       </ScrollViewer>
       <StackPanel Grid.Row="2" Margin="12,3,12,7">
         <ScrollViewer MaxHeight="50" VerticalScrollBarVisibility="Auto">
-          <TextBlock x:Name="NoticeText" Text="Chiudere il monitor non arresta il worker." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11"/>
+          <TextBlock x:Name="NoticeText" Text="Closing this window does not stop updates." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11"/>
         </ScrollViewer>
         <WrapPanel Margin="0,4,0,0" VerticalAlignment="Center">
           <TextBlock Text="&gt;&gt; " VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
-          <Button x:Name="StopButton" Content="_ARRESTA [alt+a]" IsEnabled="False" ToolTip="Stop cooperativo: l'installazione in corso puo terminare prima dell'arresto."/>
+          <Button x:Name="StopButton" Content="_STOP [alt+s]" IsEnabled="False" ToolTip="Cooperative stop: the current installation may finish before updates stop."/>
           <TextBlock Text=" / " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-          <Button x:Name="CloseButton" Content="_CHIUDI [alt+c]" ToolTip="Chiude solo il monitor; il worker continua."/>
+          <Button x:Name="CloseButton" Content="_CLOSE [alt+c]" ToolTip="Closes this window; updates continue in the background."/>
           <TextBlock x:Name="PromptCursor" Text="_" Margin="6,0,0,0" VerticalAlignment="Center"/>
         </WrapPanel>
       </StackPanel>
@@ -2149,38 +2248,37 @@ function Update-MonitorView {
     $terminal = $state.Status -in $script:TerminalStates
     $finished = $terminal -and -not $state.ActiveOperation
     $phases = @{
-        Queued='IN CODA'; Scan='SCANSIONE'; Download='DOWNLOAD'; Install='INSTALLAZIONE'
-        Verify='VERIFICA'; Resume='RIPRESA'; Retry='ATTESA RETRY'
-        RestartCountdown='RIAVVIO IN ARRIVO'; Restart='RIAVVIO CONFERMATO'
-        Cancelling='ARRESTO IN CORSO'; OperationStillRunning='OPERAZIONE ANCORA ATTIVA'
-        Completed='COMPLETATO'; CompletedWithExclusions='COMPLETATO CON ESCLUSIONI'
-        CompletedWithErrors='COMPLETATO CON ERRORI'; Blocked='BLOCCATO'; Stopped='ARRESTATO'
+        Queued='QUEUED'; Scan='SCANNING'; Download='DOWNLOAD'; Install='INSTALLATION'
+        Verify='VERIFYING'; Resume='RESUMING'; Retry='WAITING TO RETRY'
+        RestartCountdown='RESTART PENDING'; Restart='RESTART COMMITTED'
+        Cancelling='STOPPING'; OperationStillRunning='OPERATION STILL ACTIVE'
+        Completed='COMPLETED'; CompletedWithExclusions='COMPLETED WITH EXCLUSIONS'
+        CompletedWithErrors='COMPLETED WITH ERRORS'; Blocked='BLOCKED'; Stopped='STOPPED'
     }
     $phase = [string]$state.Phase
     if ($terminal) { $phase = [string]$state.Status }
     $heading = if ($phases.ContainsKey($phase)) { $phases[$phase] } else { $phase }
     $color = 'Accent'
-    $status = 'ATTIVO'
+    $status = 'ACTIVE'
     switch ($state.Status) {
-        'Completed' { $color='Success'; $status='COMPLETATO' }
-        'CompletedWithExclusions' { $color='Warning'; $status='CON ESCLUSIONI' }
-        'CompletedWithErrors' { $color='Error'; $status='CON ERRORI' }
-        'Blocked' { $color='Error'; $status='BLOCCATO' }
-        'Stopped' { $color='Muted'; $status='ARRESTATO' }
-        'WaitingForReboot' { $color='Warning'; $status='RIAVVIO' }
+        'Completed' { $color='Success'; $status='COMPLETED' }
+        'CompletedWithExclusions' { $color='Warning'; $status='WITH EXCLUSIONS' }
+        'CompletedWithErrors' { $color='Error'; $status='WITH ERRORS' }
+        'Blocked' { $color='Error'; $status='BLOCKED' }
+        'Stopped' { $color='Muted'; $status='STOPPED' }
+        'WaitingForReboot' { $color='Warning'; $status='RESTART' }
     }
-    if ($state.Phase -eq 'Retry' -and -not $terminal) { $color='Warning'; $status='IN ATTESA' }
+    if ($state.Phase -eq 'Retry' -and -not $terminal) { $color='Warning'; $status='WAITING' }
     $brush = $Window.Resources[$color]
     $Window.FindName('PhaseText').Text = $heading
     $Window.FindName('PhaseText').Foreground = $brush
     $Window.FindName('StatusText').Text = $status
     $Window.FindName('StatusText').Foreground = $brush
-    $Window.FindName('RunText').Text = 'session/' + ([string]$state.RunId).Substring(0,8)
     $Window.FindName('DetailText').Text = [string]$state.Message
-    $upgradeLabels = @{ NotRequested='non richiesto'; Requested='richiesto'; Offered='offerto'; Completed='completato'; NotOffered='non offerto'; NotCompleted='non completato' }
+    $upgradeLabels = @{ NotRequested='Not requested'; Requested='Requested'; Offered='Offered'; Completed='Completed'; NotOffered='Not offered'; NotCompleted='Not completed' }
     $upgrade = [string]$state.Windows11UpgradeStatus
     if ($upgradeLabels.ContainsKey($upgrade)) { $upgrade = $upgradeLabels[$upgrade] }
-    $Window.FindName('PhaseDetail').Text = "scan: $($state.Scans) // Win11: $upgrade"
+    $Window.FindName('PhaseDetail').Text = "Scans: $($state.Scans) // Windows 11: $upgrade"
     $failures = @($state.Failures | Where-Object { -not $_.Resolved }).Count
     $Window.FindName('InstalledCount').Text = [string]@($state.Installed).Count
     $Window.FindName('FailureCount').Text = [string]$failures
@@ -2192,14 +2290,14 @@ function Update-MonitorView {
     $bar.Value = 0
     $Window.FindName('ProgressText').Text = '--'
     $Window.FindName('ProgressText').Foreground = $brush
-    $Window.FindName('ProgressCaption').Text = 'NON DISPONIBILE'
+    $Window.FindName('ProgressCaption').Text = 'UNAVAILABLE'
     $Window.FindName('Activity').Visibility = 'Collapsed'
     # A percentage belongs to the current WUA operation, never to the whole maintenance run.
     if (-not $terminal -and $state.Phase -in @('Download','Install') -and
         $null -ne $state.ProgressPercent -and $state.ProgressPercent -ge 0 -and $state.ProgressPercent -le 100) {
         $bar.Value = $state.ProgressPercent
         $Window.FindName('ProgressText').Text = "$($state.ProgressPercent)%"
-        $Window.FindName('ProgressCaption').Text = 'IN QUESTA FASE'
+        $Window.FindName('ProgressCaption').Text = 'IN THIS PHASE'
     } elseif (-not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')) {
         $Window.FindName('Activity').Visibility = 'Visible'
     }
@@ -2207,17 +2305,17 @@ function Update-MonitorView {
         # Display the worker's last reported countdown; do not extrapolate a restart from wall-clock time.
         if ($state.Message -match '^Restart in (\d+) seconds\.') {
             $Window.FindName('ProgressText').Text = $Matches[1] + 's'
-            $Window.FindName('ProgressCaption').Text = 'ULTIMO SEGNALE'
+            $Window.FindName('ProgressCaption').Text = 'LAST REPORTED'
         }
     }
-    $notice = 'Chiudere il monitor non arresta il worker.'
-    if ($Snapshot.StopRequested) { $notice = 'Stop richiesto. In attesa dell''operazione corrente.' }
-    if ($state.RebootCommitted) { $notice = 'Riavvio confermato. Non annullabile dal monitor.' }
-    if ($terminal -and $state.ActiveOperation) { $notice = 'WUA potrebbe essere ancora attiva. Verificare il log.' }
-    if ($finished -and -not $state.RebootCommitted) { $notice = 'Esito conservato fino alla chiusura.' }
-    if ($state.CleanupError) { $notice = 'Pulizia incompleta: ' + $state.CleanupError }
+    $notice = 'Closing this window does not stop updates.'
+    if ($Snapshot.StopRequested) { $notice = 'Stop requested. Waiting for the current operation.' }
+    if ($state.RebootCommitted) { $notice = 'Restart committed. Cannot be cancelled from this window.' }
+    if ($terminal -and $state.ActiveOperation) { $notice = 'WUA may still be active. Check the log.' }
+    if ($finished -and -not $state.RebootCommitted) { $notice = 'Result retained until this window closes.' }
+    if ($state.CleanupError) { $notice = 'Cleanup incomplete: ' + $state.CleanupError }
     $updated = [DateTime]::Parse([string]$state.UpdatedUtc).ToLocalTime().ToString('HH:mm:ss')
-    $Window.FindName('NoticeText').Text = "$notice  ultimo segnale: $updated"
+    $Window.FindName('NoticeText').Text = "$notice  Last update: $updated"
     $Window.FindName('NoticeText').Foreground = $Window.Resources[$(if ($state.CleanupError) { 'Error' } else { 'Muted' })]
     $Window.FindName('StopButton').IsEnabled = -not $terminal -and -not $state.RebootCommitted -and -not $Snapshot.StopRequested
     $urgent = $terminal -or $Snapshot.StopRequested -or $state.RebootCommitted -or $state.Phase -eq 'RestartCountdown' -or $failures -gt 0 -or $state.CleanupError -or $Snapshot.Log -match '\[(ERROR|WARN|WARNING)\]'
@@ -2236,10 +2334,11 @@ function Get-MonitorSnapshot {
         }
         Initialize-RuntimeState $state
         $finished = $state.Status -in $script:TerminalStates -and -not $state.ActiveOperation
-        $text = @(Get-Content -LiteralPath $script:LogPath -Encoding UTF8 -Tail 60 -ErrorAction Stop) -join "`r`n"
+        Initialize-MemoryLog $RunId -ReadOnly
+        $text = Read-MemoryLog
         if ($finished) {
-            $text += "`r`n`r`nESCLUSIONI:`r`n" + (($state.Skipped | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
-            $text += "`r`n`r`nERRORI APERTI:`r`n" + (($state.Failures | Where-Object { -not $_.Resolved } | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
+            $text += "`r`n`r`nEXCLUSIONS:`r`n" + (($state.Skipped | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
+            $text += "`r`n`r`nOPEN ERRORS:`r`n" + (($state.Failures | Where-Object { -not $_.Resolved } | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
         }
         Send-CompletionSound $state
         if ($finished -and $AcknowledgeFinal) { [IO.File]::WriteAllText($script:ResultReadPath, $RunId) }
@@ -2252,14 +2351,18 @@ function New-MonitorReader {
     $session = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     foreach ($name in @('Assert-Administrator','Enter-RunLock','Exit-RunLock','Read-JsonState','Get-State',
         'Initialize-Windows11UpgradeState','Initialize-RuntimeState','Invoke-Stop',
-        'Play-CompletionSound','Send-CompletionSound','Get-MonitorSnapshot')) {
+        'Play-CompletionSound','Send-CompletionSound','Get-MonitorSnapshot',
+        'Initialize-MemoryLog','Close-MemoryLog','Read-MemoryLog')) {
         $session.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, (Get-Item "Function:$name").Definition))
     }
-    foreach ($name in @('Root','StatePath','BackupPath','StopPath','LogPath','ControlLockName',
+    foreach ($name in @('Root','StatePath','BackupPath','StopPath','LogNamePrefix','ControlLockName',
         'NotificationPath','ResultReadPath','TerminalStates','TaskName')) {
         $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($name, (Get-Variable -Name $name -Scope Script -ValueOnly), ''))
     }
     $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('ErrorActionPreference', 'Stop', ''))
+    $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLog', $null, ''))
+    $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLogRunId', '', ''))
+    $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('MemoryLogError', '', ''))
     $reader = [PowerShell]::Create($session)
     return $reader
 }
@@ -2300,8 +2403,8 @@ function Invoke-Monitor {
                     if ($null -eq $snapshot.State) {
                         if ($view.FinalRead) {
                             $window.FindName('NoticeText').Text = $(if ($snapshot.Cleaned) {
-                                'Pulizia completata. Esito conservato in questa finestra.'
-                            } else { 'La sessione precedente non e'' piu disponibile.' })
+                                'Cleanup completed. Result retained in this window.'
+                            } else { 'The previous session is no longer available.' })
                             $view.Detached = $true
                         } else { $window.Close() }
                         return
@@ -2320,9 +2423,9 @@ function Invoke-Monitor {
                 }
                 if ($view.Stopping -or $view.RequestStop) { $window.FindName('StopButton').IsEnabled = $false }
             } catch {
-                $window.FindName('PhaseText').Text = 'LETTURA / COMANDO FALLITI'
+                $window.FindName('PhaseText').Text = 'READ / COMMAND FAILED'
                 $window.FindName('PhaseText').Foreground = $window.Resources['Error']
-                $window.FindName('StatusText').Text = 'ERRORE MONITOR'
+                $window.FindName('StatusText').Text = 'MONITOR ERROR'
                 $window.FindName('StatusText').Foreground = $window.Resources['Error']
                 $window.FindName('NoticeText').Text = $_.Exception.Message
                 $window.FindName('StopButton').IsEnabled = $false
@@ -2330,7 +2433,7 @@ function Invoke-Monitor {
                 Update-MonitorLog $window -Immediate
                 $window.FindName('Progress').Value = 0
                 $window.FindName('ProgressText').Text = '--'
-                $window.FindName('ProgressCaption').Text = 'STATO NON LETTO'
+                $window.FindName('ProgressCaption').Text = 'STATUS UNAVAILABLE'
                 $view.NextRead = [DateTime]::UtcNow.AddSeconds(3)
             }
         }
@@ -2339,7 +2442,7 @@ function Invoke-Monitor {
         $window.FindName('StopButton').add_Click({
             $view.RequestStop = $true
             $window.FindName('StopButton').IsEnabled = $false
-            $window.FindName('NoticeText').Text = 'Invio richiesta di stop...'
+            $window.FindName('NoticeText').Text = 'Sending stop request...'
             & $refresh
         })
         $window.FindName('CloseButton').add_Click({ $window.Close() })
@@ -2360,17 +2463,25 @@ function Invoke-Monitor {
                 }
                 if ($reader.HadErrors) { Write-Warning ($reader.Streams.Error | Out-String) }
             } catch { Write-Warning ('Monitor closing: ' + $_.Exception.Message) }
-            finally { $reader.Dispose() }
+            finally {
+                try {
+                    $reader.Commands.Clear()
+                    [void]$reader.AddCommand('Close-MemoryLog')
+                    $null = $reader.Invoke()
+                } finally { $reader.Dispose() }
+            }
         }
         if ($owned) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
 }
 
-switch ($Action) {
-    'Start'   { Invoke-Start }
-    'Worker'  { Invoke-Worker }
-    'Status'  { Show-Status }
-    'Monitor' { Invoke-Monitor }
-    'Stop'    { Invoke-Stop }
-}
+try {
+    switch ($Action) {
+        'Start'   { Invoke-Start }
+        'Worker'  { Invoke-Worker }
+        'Status'  { Show-Status }
+        'Monitor' { Invoke-Monitor }
+        'Stop'    { Invoke-Stop }
+    }
+} finally { Close-MemoryLog }

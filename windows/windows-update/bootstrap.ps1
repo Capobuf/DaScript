@@ -34,7 +34,7 @@ if (-not $AllowServerReboot) {
 }
 $uri = [Uri]$workerUrl
 if ($uri.Scheme -ne 'https') { throw 'HTTPS is required.' }
-$download = Join-Path $env:TEMP ('MSP-WindowsUpdate-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+$download = Join-Path $env:TEMP ('DaScript-WindowsUpdate-' + [Guid]::NewGuid().ToString('N') + '.ps1')
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $uri -UseBasicParsing -OutFile $download
@@ -44,7 +44,7 @@ try {
     if ($AllowServerReboot) { $arguments += '-AllowServerReboot' }
     if ($NoMonitor) { $arguments += '-NoMonitor' }
     & $powershell @arguments
-    if ($LASTEXITCODE -ne 0) { throw "MSP Windows Update returned exit code $LASTEXITCODE." }
+    if ($LASTEXITCODE -ne 0) { throw "DaScript Windows Update returned exit code $LASTEXITCODE." }
 } finally {
     if (Test-Path -LiteralPath $download) {
         Remove-Item -LiteralPath $download -Force

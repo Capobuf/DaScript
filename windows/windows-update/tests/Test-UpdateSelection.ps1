@@ -107,7 +107,8 @@ $upgrade.IsBeta = $true
 Assert-True (@(Select-TestUpdate $state $upgrade).Count -eq 0) 'Upgrade consent enabled beta content.'
 $upgrade.IsBeta = $false
 $upgrade.InstallationBehavior.CanRequestUserInput = $true
-Assert-True (@(Select-TestUpdate $state $upgrade).Count -eq 0) 'Upgrade consent enabled interactive installation.'
+Assert-True (@(Select-TestUpdate $state $upgrade).Count -eq 1) 'Possible interaction excluded an authorized upgrade.'
+Assert-True ($state.Skipped.Count -eq 0) 'Possible interaction was reported as an exclusion.'
 $upgrade.InstallationBehavior.CanRequestUserInput = $false
 $state.IncludeFeatureUpgrades = $false
 Assert-True (@(Select-TestUpdate $state $upgrade $win11).Count -eq 0) 'Windows 10 consent enabled later Windows 11 feature upgrades.'
@@ -117,6 +118,15 @@ $state.IncludeOptional = $true
 $driver = New-TestUpdate 'OEM Firmware' $false
 $driver.Type = 2
 Assert-True (@(Select-TestUpdate $state $driver).Count -eq 1) 'Optional firmware driver was excluded.'
+$driver.Title = 'Realtek Semiconductor Corp. Driver Update (1030.52.1216.2025)'
+$driver.InstallationBehavior.CanRequestUserInput = $true
+foreach ($platform in @($win10, $win11, $server)) {
+    Assert-True (@(Select-TestUpdate $state $driver $platform).Count -eq 1) 'Possible interaction excluded an applicable driver.'
+    Assert-True ($state.Skipped.Count -eq 0 -and $state.Failures.Count -eq 0) 'Possible interaction created an exclusion or failure.'
+}
+$driver.InstallationBehavior.Impact = 2
+Assert-True (@(Select-TestUpdate $state $driver).Count -eq 1) 'Possible interaction excluded an exclusive update.'
+$driver.InstallationBehavior.Impact = 0
 $state.IncludeDrivers = $false
 Assert-True (@(Select-TestUpdate $state $driver).Count -eq 0) 'Explicit driver exclusion was ignored.'
 Assert-True (@($state.Skipped).Count -eq 1) 'Excluded driver was not reported.'
