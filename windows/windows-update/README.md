@@ -58,18 +58,18 @@ Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione e
 
 ## Avvio da URL GitHub
 
-I comandi seguenti fissano il bootstrap alla revisione `93f7d68f58e4d3d70c32337964e7137eaab8d1d1`, che scarica il worker `bb5447cb5aa9b7a2aefe41ea47bcdee8668bbcc1`. Entrambi gli URL usano **commit Git immutabili**; il bootstrap deve essere aggiornato intenzionalmente quando lo script principale cambia.
+I comandi seguenti fissano il bootstrap alla revisione `8e1ec710f781e48a531c8af0144299c04bd91eff`, che scarica il worker `56939b92f9cac0eab59de84646a611bb2d34f8e0`. Entrambi gli URL usano **commit Git immutabili**; il bootstrap deve essere aggiornato intenzionalmente quando lo script principale cambia.
 
 Client (PowerShell amministrativa):
 
 ```powershell
-irm 'https://raw.githubusercontent.com/Capobuf/DaScript/93f7d68f58e4d3d70c32337964e7137eaab8d1d1/windows/windows-update/bootstrap.ps1' | iex
+irm 'https://raw.githubusercontent.com/Capobuf/DaScript/8e1ec710f781e48a531c8af0144299c04bd91eff/windows/windows-update/bootstrap.ps1' | iex
 ```
 
 Server (con consenso ai riavvii):
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/93f7d68f58e4d3d70c32337964e7137eaab8d1d1/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/8e1ec710f781e48a531c8af0144299c04bd91eff/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
 ```
 
 Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza domanda iniziale e `-NoMonitor` per esecuzioni senza interfaccia. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
@@ -124,7 +124,11 @@ powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateSelection.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Selection checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateLifecycle.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Lifecycle checks failed' }
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UwfDetection.ps1
+if ($LASTEXITCODE -ne 0) { throw 'UWF checks failed' }
 ```
+
+Il controllo UWF include query CIM in sola lettura: verifica gli errori reali di classe/namespace assenti e distingue `NativeErrorCode` dal valore numerico di `StatusCode`. Errori di accesso o del provider restano bloccanti.
 
 Casi di collaudo consigliati, su sistemi rappresentativi:
 
