@@ -1,5 +1,33 @@
 # MSP Windows Update
 
+## Avvio da URL GitHub
+
+I comandi seguenti caricano il bootstrap da `main`. A ogni nuovo avvio il bootstrap scarica il worker corrente dallo stesso branch, quindi le versioni pubblicate su `main` diventano disponibili senza cambiare il comando. Le esecuzioni già avviate continuano a usare la propria copia locale, anche dopo un riavvio.
+
+Client e Server (Windows PowerShell 5.1 come amministratore):
+
+```powershell
+irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1' | iex
+```
+
+Su **Windows Server**, il bootstrap chiede prima di scaricare e avviare il worker:
+
+```text
+Autorizzi i riavvii automatici del server? [s/N]
+```
+
+Solo `s` (anche maiuscola) autorizza l'avvio e passa `-AllowServerReboot` al worker. Invio o qualsiasi altra risposta annullano l'avvio. I riavvii interrompono i servizi e chiudono forzatamente le applicazioni: salvare il lavoro e pianificare una finestra di manutenzione. Il riconoscimento usa `Win32_OperatingSystem.ProductType`, includendo i controller di dominio; se non riesce, l'avvio si interrompe.
+
+Server senza domanda iniziale (consenso esplicito ai riavvii):
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
+```
+
+Per avvii unattended su Server è necessario `-AllowServerReboot`: senza consenso, una sessione non interattiva o con input reindirizzato viene bloccata. Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza la domanda sull'upgrade e `-NoMonitor` per esecuzioni senza interfaccia. `-NoMonitor` non disabilita la domanda sui riavvii. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
+
+**Attenzione:** questi comandi eseguono codice scaricato da Internet con i privilegi della sessione. Verificare il contenuto del repository e del bootstrap prima di usarli su macchine di clienti.
+
 Script PowerShell per la manutenzione unattended di Windows. Usa le API native Windows Update Agent (WUA) e una attività pianificata come `SYSTEM` per cercare, scaricare e installare aggiornamenti; riavvia quando necessario e riprende automaticamente dopo il boot, fino a due scansioni consecutive senza ulteriori aggiornamenti **eleggibili**.
 
 **Stato:** sviluppo. Compatibilità progettata sulle API Microsoft; i controlli di sintassi e dei flussi isolati non sostituiscono il collaudo di installazione, firmware, upgrade e ripresa su VM/snapshot o hardware di prova.
@@ -49,7 +77,7 @@ Server (riavvio automatico autorizzato esplicitamente):
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\MSP-WindowsUpdate.ps1 -Action Start -AllowServerReboot
 ```
 
-Su Windows Server, senza `-AllowServerReboot`, l'avvio viene **bloccato prima di installare**. Questa protezione evita riavvii accidentali di server in produzione. Pianificare una finestra di manutenzione.
+Nell'avvio locale diretto del worker su Windows Server, senza `-AllowServerReboot`, l'avvio viene **bloccato prima di installare**. Il bootstrap da URL passa questa opzione solo dopo il consenso iniziale o quando è già specificata nel comando. Pianificare una finestra di manutenzione.
 
 Il comando avvia un **monitor WPF/XAML separato**, integrato nello stesso `.ps1`, con un'unica superficie da terminale ambra: logo vettoriale fornito come filigrana centrale sullo sfondo del terminale, senza intestazione dedicata, etichette essenziali, righe compatte di stato e conteggi, comandi testuali sulla riga inferiore e trama CRT. Il logo resta intero e fermo: un passaggio di luce lento e variazioni graduali di intensità ne animano la superficie. Rumore di caratteri e banda di scansione animano lo sfondo dell'intera finestra; il cursore resta intermittente. Sono effetti decorativi: non alterano log, stato o percentuali. Mostra fase, percentuale della singola operazione WUA quando disponibile, aggiornamento corrente, conteggi, countdown e log. Il lavoro prosegue come `SYSTEM`, anche chiudendo la finestra o senza login.
 
@@ -62,26 +90,6 @@ La barra segmentata rappresenta soltanto una percentuale comunicata da WUA; `--`
 Un secondo task riapre il monitor **al login dello stesso account che ha avviato lo script**, con token interattivo elevato e senza salvare password, finché il lavoro è in corso. A fine lavoro il worker concede al monitor aperto fino a 10 secondi per leggere il risultato, poi rimuove automaticamente i propri file e i due task. La finestra già aperta conserva il riepilogo **in memoria**, fino alla chiusura. Se il lavoro termina senza monitor aperto o senza login, la pulizia avviene comunque: non resta un riepilogo da mostrare al login successivo. Non viene modificato l'accesso automatico di Windows.
 
 Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione per `Completed` e `CompletedWithExclusions`; le esclusioni restano evidenziate nella finestra. Audio disponibile, volume e schema sonoro dipendono dalla sessione. Errori, blocchi e arresti hanno un esito visivo distinto e non producono il suono di successo. `-NoMonitor` disabilita finestra, riapertura al login e suono; è necessario per l'avvio da una sessione di servizio senza desktop.
-
-## Avvio da URL GitHub
-
-I comandi seguenti caricano il bootstrap da `main`. A ogni nuovo avvio il bootstrap scarica il worker corrente dallo stesso branch, quindi le versioni pubblicate su `main` diventano disponibili senza cambiare il comando. Le esecuzioni già avviate continuano a usare la propria copia locale, anche dopo un riavvio.
-
-Client (PowerShell amministrativa):
-
-```powershell
-irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1' | iex
-```
-
-Server (con consenso ai riavvii):
-
-```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
-```
-
-Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza domanda iniziale e `-NoMonitor` per esecuzioni senza interfaccia. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
-
-**Attenzione:** questi comandi eseguono codice scaricato da Internet con i privilegi della sessione. Verificare il contenuto del repository e del bootstrap prima di usarli su macchine di clienti.
 
 ## Stato e arresto
 
@@ -142,6 +150,8 @@ Alla fine del countdown il riavvio usa esplicitamente `/f`: chiude forzatamente 
 Controlli rapidi di riconoscimento piattaforma, consenso, filtri e ciclo operativo su dati sintetici e file temporanei, senza avviare aggiornamenti o riavvii (arresto al primo errore):
 
 ```powershell
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootstrapConsent.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap consent checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateSelection.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Selection checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateLifecycle.ps1
@@ -151,6 +161,8 @@ if ($LASTEXITCODE -ne 0) { throw 'UWF checks failed' }
 powershell.exe -NoProfile -NonInteractive -STA -File .\tests\Test-Monitor.ps1
 if ($LASTEXITCODE -ne 0) { throw 'WPF checks failed' }
 ```
+
+`Test-BootstrapConsent.ps1` isola il consenso senza scaricare né avviare il worker. Usa dati CIM e risposte sintetiche per client, server e controller di dominio, consenso esplicito, risposta negativa e lettura fallita. In una console verifica le risposte; con input reindirizzato verifica il blocco prima della domanda. L'output indica quale percorso è stato verificato.
 
 Il controllo UWF include query CIM in sola lettura: verifica gli errori reali di classe/namespace assenti e distingue `NativeErrorCode` dal valore numerico di `StatusCode`. Errori di accesso o del provider restano bloccanti.
 
@@ -170,6 +182,8 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 
 ## Riferimenti
 
+- [Win32_OperatingSystem e ProductType](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-operatingsystem)
+- [PowerShell: modalità NonInteractive](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1#-noninteractive)
 - [Windows Update Agent API](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/portal-client)
 - [Ricerca, download e installazione con WUA](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/searching--downloading--and-installing-updates)
 - [Scheduled Tasks PowerShell](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/register-scheduledtask)

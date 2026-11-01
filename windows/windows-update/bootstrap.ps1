@@ -15,6 +15,23 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Open Windows PowerShell as Administrator.'
 }
+if (-not $AllowServerReboot) {
+    $productType = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType
+    if ($productType -notin 1, 2, 3) { throw 'Unable to determine whether this computer is a Windows client or server.' }
+    if ($productType -in 2, 3) {
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected -or
+            [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+            throw 'Unattended start on Windows Server requires -AllowServerReboot.'
+        }
+        Write-Warning 'Automatic restarts interrupt services and forcibly close applications. Save all work before continuing.'
+        try { $answer = Read-Host 'Autorizzi i riavvii automatici del server? [s/N]' }
+        catch { throw 'Cannot read the initial choice. Specify -AllowServerReboot to authorize unattended server restarts.' }
+        if (([string]$answer).Trim() -ine 's') {
+            throw 'Server restarts were not authorized. No updates were started.'
+        }
+        $AllowServerReboot = $true
+    }
+}
 $uri = [Uri]$workerUrl
 if ($uri.Scheme -ne 'https') { throw 'HTTPS is required.' }
 $download = Join-Path $env:TEMP ('MSP-WindowsUpdate-' + [Guid]::NewGuid().ToString('N') + '.ps1')

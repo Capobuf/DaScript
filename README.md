@@ -1,5 +1,15 @@
 # DaScript
 
+## Avvio rapido — MSP Windows Update
+
+Aprire **Windows PowerShell 5.1 come amministratore** ed eseguire:
+
+```powershell
+irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1' | iex
+```
+
+Il comando scarica a ogni avvio l'**ultima versione pubblicata su `main`**, senza dover aggiornare l'URL. Installa aggiornamenti e può riavviare automaticamente il PC: salvare il lavoro prima di avviarlo. Su Windows Server chiede il consenso iniziale ai riavvii automatici: solo `s` autorizza l'avvio; Invio o qualsiasi altra risposta lo annullano. Vedere [opzioni, prerequisiti e rischi](windows/windows-update/README.md).
+
 Raccolta di script PowerShell per **MSP, sysadmin e assistenza IT su Windows**. Obiettivo: automatizzare operazioni ricorrenti senza aggiungere complessità inutile.
 
 ## Script
