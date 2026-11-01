@@ -268,9 +268,12 @@ function Test-UwfEnabled {
     try {
         $uwf = @(Get-CimInstance -Namespace 'root/standardcimv2/embedded' -ClassName UWF_Filter -ErrorAction Stop)
     } catch {
-        # Missing WMI namespace/class means UWF is not installed on this OS.
+        # StatusCode is numeric; NativeErrorCode exposes the locale-independent enum.
         if ($_.Exception -is [Microsoft.Management.Infrastructure.CimException] -and
-            [string]$_.Exception.StatusCode -in @('InvalidNamespace', 'InvalidClass')) {
+            $_.Exception.NativeErrorCode -in @(
+                [Microsoft.Management.Infrastructure.NativeErrorCode]::InvalidNamespace,
+                [Microsoft.Management.Infrastructure.NativeErrorCode]::InvalidClass
+            )) {
             return $false
         }
         throw ('Unable to determine Unified Write Filter status: ' + $_.Exception.Message)
