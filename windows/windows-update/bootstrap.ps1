@@ -2,12 +2,14 @@
 [CmdletBinding()]
 param(
     [switch]$AllowServerReboot,
-    [switch]$NoMonitor
+    [switch]$NoMonitor,
+    [ValidateSet('Ask', 'Allow', 'Skip')]
+    [string]$Windows11Upgrade = 'Ask'
 )
 
 $ErrorActionPreference = 'Stop'
 # Pin the worker to the reviewed Git commit rather than a mutable branch.
-$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/19a23054e25d6b357390f48733e531b81ecdb263/windows/windows-update/MSP-WindowsUpdate.ps1'
+$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/bb5447cb5aa9b7a2aefe41ea47bcdee8668bbcc1/windows/windows-update/MSP-WindowsUpdate.ps1'
 
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -21,7 +23,7 @@ try {
     Invoke-WebRequest -Uri $uri -UseBasicParsing -OutFile $download
 
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $download, '-Action', 'Start')
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $download, '-Action', 'Start', '-Windows11Upgrade', $Windows11Upgrade)
     if ($AllowServerReboot) { $arguments += '-AllowServerReboot' }
     if ($NoMonitor) { $arguments += '-NoMonitor' }
     & $powershell @arguments
