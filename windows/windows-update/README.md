@@ -58,21 +58,21 @@ Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione e
 
 ## Avvio da URL GitHub
 
-**Le funzionalità descritte qui richiedono il file locale aggiornato.** Il bootstrap seguente punta ancora alla precedente revisione pubblicata: non comprende le modifiche locali. Il pin va aggiornato a un commit verificato e pubblicato prima di distribuire la nuova versione via URL.
-
-Il bootstrap scarica una **revisione fissata a un commit Git** dello script e non un file arbitrario del branch `main`. Il bootstrap deve essere aggiornato intenzionalmente quando lo script principale cambia.
+I comandi seguenti fissano il bootstrap alla revisione `93f7d68f58e4d3d70c32337964e7137eaab8d1d1`, che scarica il worker `bb5447cb5aa9b7a2aefe41ea47bcdee8668bbcc1`. Entrambi gli URL usano **commit Git immutabili**; il bootstrap deve essere aggiornato intenzionalmente quando lo script principale cambia.
 
 Client (PowerShell amministrativa):
 
 ```powershell
-irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1' | iex
+irm 'https://raw.githubusercontent.com/Capobuf/DaScript/93f7d68f58e4d3d70c32337964e7137eaab8d1d1/windows/windows-update/bootstrap.ps1' | iex
 ```
 
 Server (con consenso ai riavvii):
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot -NoMonitor
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/93f7d68f58e4d3d70c32337964e7137eaab8d1d1/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
 ```
+
+Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza domanda iniziale e `-NoMonitor` per esecuzioni senza interfaccia. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
 
 **Attenzione:** questi comandi eseguono codice scaricato da Internet con i privilegi della sessione. Verificare il contenuto del repository e del bootstrap prima di usarli su macchine di clienti.
 
