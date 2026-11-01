@@ -2,7 +2,7 @@
 
 Script PowerShell per la manutenzione unattended di Windows. Usa le API native Windows Update Agent (WUA) e una attività pianificata come `SYSTEM` per cercare, scaricare e installare aggiornamenti; riavvia quando necessario e riprende automaticamente dopo il boot, fino a due scansioni consecutive senza ulteriori aggiornamenti **eleggibili**.
 
-**Stato:** prototipo. Codice verificato logicamente e contro le API Microsoft, **non eseguito né collaudato su Windows**. Non utilizzare direttamente in produzione senza test.
+**Stato:** prima versione, non ancora collaudata su Windows. Il supporto delle API e i requisiti di compatibilità vanno valutati tramite la documentazione Microsoft; collaudare i flussi critici prima dell'uso operativo.
 
 ## Compatibilità prevista
 
@@ -11,7 +11,6 @@ Script PowerShell per la manutenzione unattended di Windows. Usa le API native W
 - **Requisito:** Windows PowerShell **5.1**, diritti amministrativi, Windows Update Agent funzionante, attività pianificate e accesso alla sorgente aggiornamenti configurata (Windows Update, Microsoft Update se già abilitato, oppure WSUS).
 - Server 2012/2012 R2 possono richiedere l'installazione separata di WMF 5.1 e sono fuori supporto ordinario. L'assenza di update visibili non prova che un sistema sia supportato o sicuro.
 - Sulle edizioni IoT/Enterprise con **Unified Write Filter (UWF) attivo**, lo script **rifiuta l'avvio**: gli aggiornamenti rischiano di andare persi al riavvio. Usare la modalità di manutenzione UWF prevista da Windows.
-- Non è stata ancora verificata la compatibilità reale delle singole edizioni e versioni qui elencate.
 
 Il riconoscimento di client/server usa i dati del sistema operativo, non stringhe localizzate o liste di nomi delle edizioni.
 
@@ -89,7 +88,7 @@ Gli stati conclusivi sono `Completed`, `CompletedWithErrors`, `Blocked` e `Stopp
 
 I riavvii possono chiudere applicazioni e interrompere servizi. Prima del test, salvare i dati, avere un backup, verificare BitLocker/pre-boot PIN, alimentazione, accesso di rete e, sui server, la finestra di manutenzione.
 
-Test manuali minimi prima dell'uso operativo:
+Casi di collaudo consigliati, su sistemi rappresentativi:
 
 1. Windows 11: nessun aggiornamento, due scansioni, stato finale e rimozione task.
 2. Aggiornamento cumulativo che richiede un riavvio: ripresa senza login e convergenza.
@@ -97,8 +96,6 @@ Test manuali minimi prima dell'uso operativo:
 4. `Stop` durante il lavoro e durante il countdown del riavvio.
 5. Un Windows Server (preferibilmente Server Core): rifiuto senza `-AllowServerReboot`, quindi test autorizzato.
 6. Dove disponibili: Windows 10 LTSC/IoT, UWF attivo (blocco previsto), policy WSUS.
-
-**Non eseguiti:** tutti i test pratici sopra elencati. È necessario un ambiente Windows per convalidarli.
 
 ## Riferimenti
 
