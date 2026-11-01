@@ -2037,7 +2037,7 @@ function New-MonitorWindow {
         $row.ToString()
     })
     $window.FindName('LogoHost').Tag = [pscustomobject]@{
-        Index=0L; Active=$false; Random=$random; LightY=-0.2; LightSpeed=0.012
+        Index=0L; Random=$random; LightY=-0.2; LightSpeed=0.012
         NextTone=0L; LogoTone=0.16; NextNoise=0L; NoiseRows=$noiseRows; ScanY=0.0; ScanSpeed=4.0
     }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
@@ -2047,7 +2047,8 @@ function New-MonitorWindow {
 function Update-MonitorAnimation {
     param([object]$Window)
     $motion = $Window.FindName('LogoHost').Tag
-    $moving = $motion.Active -and $Window.WindowState -ne 'Minimized' -and [Windows.SystemParameters]::ClientAreaAnimation
+    # Terminal effects are part of this view, independent of worker phase and Windows chrome animations.
+    $moving = $Window.WindowState -ne 'Minimized'
     Update-MonitorLog $Window -Immediate:(-not $moving)
     if ($moving) {
         $motion.Index++
@@ -2117,7 +2118,7 @@ function Update-MonitorLog {
         $buffer.Target = $Text
         $buffer.Lines = $lines
     }
-    if ($Immediate -or -not [Windows.SystemParameters]::ClientAreaAnimation) {
+    if ($Immediate) {
         $buffer.Visible = $buffer.Lines.Count
     } elseif ($buffer.Visible -lt $buffer.Lines.Count) {
         $remaining = $buffer.Lines.Count - $buffer.Visible
@@ -2166,7 +2167,6 @@ function Update-MonitorView {
     $Window.FindName('PhaseText').Foreground = $brush
     $Window.FindName('StatusText').Text = $status
     $Window.FindName('StatusText').Foreground = $brush
-    $Window.FindName('LogoHost').Tag.Active = -not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')
     $Window.FindName('RunText').Text = 'session/' + ([string]$state.RunId).Substring(0,8)
     $Window.FindName('DetailText').Text = [string]$state.Message
     $upgradeLabels = @{ NotRequested='non richiesto'; Requested='richiesto'; Offered='offerto'; Completed='completato'; NotOffered='non offerto'; NotCompleted='non completato' }
@@ -2193,7 +2193,7 @@ function Update-MonitorView {
         $Window.FindName('ProgressText').Text = "$($state.ProgressPercent)%"
         $Window.FindName('ProgressCaption').Text = 'IN QUESTA FASE'
     } elseif (-not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')) {
-        if ([Windows.SystemParameters]::ClientAreaAnimation) { $Window.FindName('Activity').Visibility = 'Visible' }
+        $Window.FindName('Activity').Visibility = 'Visible'
     }
     if ($state.Phase -eq 'RestartCountdown' -and -not $terminal) {
         # Display the worker's last reported countdown; do not extrapolate a restart from wall-clock time.
@@ -2274,13 +2274,14 @@ function Invoke-Monitor {
     try {
         try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
         if (-not $owned) { return }
-        $view = [pscustomobject]@{ FinalRead=$false; Pending=$null; NextRead=[DateTime]::MinValue; RequestStop=$false; Stopping=$false }
+        $view = [pscustomobject]@{ FinalRead=$false; Detached=$false; Pending=$null; NextRead=[DateTime]::MinValue; RequestStop=$false; Stopping=$false }
         $reader = New-MonitorReader
         $timer = [Windows.Threading.DispatcherTimer]::new()
         $timer.Interval = [TimeSpan]::FromMilliseconds(120)
         $refresh = {
             try {
                 Update-MonitorAnimation $window
+                if ($view.Detached) { return }
                 if ($null -ne $view.Pending) {
                     if (-not $view.Pending.IsCompleted) { return }
                     try {
@@ -2293,7 +2294,7 @@ function Invoke-Monitor {
                             $window.FindName('NoticeText').Text = $(if ($snapshot.Cleaned) {
                                 'Pulizia completata. Esito conservato in questa finestra.'
                             } else { 'La sessione precedente non e'' piu disponibile.' })
-                            $timer.Stop()
+                            $view.Detached = $true
                         } else { $window.Close() }
                         return
                     }
@@ -2318,7 +2319,6 @@ function Invoke-Monitor {
                 $window.FindName('NoticeText').Text = $_.Exception.Message
                 $window.FindName('StopButton').IsEnabled = $false
                 $window.FindName('Activity').Visibility = 'Collapsed'
-                $window.FindName('LogoHost').Tag.Active = $false
                 Update-MonitorLog $window -Immediate
                 $window.FindName('Progress').Value = 0
                 $window.FindName('ProgressText').Text = '--'

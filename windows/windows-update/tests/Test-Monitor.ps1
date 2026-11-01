@@ -74,24 +74,26 @@ try {
     Assert-True ($logo.IsFrozen -and $logo.Bounds.Width -eq 1180 -and $logo.Bounds.Height -eq 964) 'Embedded vector logo is missing or invalid.'
     $snapshot = [pscustomobject]@{State=$state; Log='Synthetic log'; StopRequested=$false}
     Update-MonitorView $window $snapshot
-    Assert-True $signal.Tag.Active 'Logo animation is disabled during installation.'
     $index = $signal.Tag.Index
     Update-MonitorAnimation $window
-    Assert-True ($signal.Tag.Index -eq $(if ([Windows.SystemParameters]::ClientAreaAnimation) { $index + 1 } else { $index })) 'Logo ignores the animation setting.'
+    Assert-True ($signal.Tag.Index -eq $index+1 -and $window.FindName('NoiseText').Text.Length -gt 0) 'Terminal animation did not advance.'
     $signal.Tag.Random = [Random]::new(1234)
     $lightPosition = $signal.Tag.LightY
     Update-MonitorAnimation $window
-    Assert-True ($window.FindName('LogoGlow').Opacity -eq $(if ([Windows.SystemParameters]::ClientAreaAnimation) { 0.20 } else { 0 })) 'Logo illumination ignores the animation setting.'
+    Assert-True ($window.FindName('LogoGlow').Opacity -eq 0.20) 'Logo illumination is disabled.'
     Assert-True ($signal.Parent -eq $window.FindName('AmbientField') -and $null -eq $window.FindName('LogoFragments')) 'Logo is not an intact terminal background.'
-    if ([Windows.SystemParameters]::ClientAreaAnimation) {
-        Assert-True ($signal.Tag.LightY -gt $lightPosition -and $window.FindName('LogoPath').RenderTransform.Value.IsIdentity) 'Logo illumination moved or distorted the silhouette.'
-    }
+    Assert-True ($signal.Tag.LightY -gt $lightPosition -and $window.FindName('LogoPath').RenderTransform.Value.IsIdentity) 'Logo illumination moved or distorted the silhouette.'
+    $index = $signal.Tag.Index
+    $window.WindowState = 'Minimized'
+    Update-MonitorAnimation $window
+    Assert-True ($signal.Tag.Index -eq $index -and $window.FindName('LogoGlow').Opacity -eq 0) 'Minimized window kept animating.'
+    $window.WindowState = 'Normal'
+    Update-MonitorAnimation $window
+    Assert-True ($signal.Tag.Index -eq $index+1) 'Restored window did not resume animation.'
     Assert-True ($window.FindName('LogText').Text -eq 'Synthetic log' -and $window.FindName('Progress').Value -eq 42) 'Decorative glitch changed operational content.'
     $snapshot.Log = (1..20 | ForEach-Object { "Synthetic line $_" }) -join "`r`n"
     Update-MonitorView $window $snapshot
-    if ([Windows.SystemParameters]::ClientAreaAnimation) {
-        Assert-True ($window.FindName('LogText').Tag.Visible -gt 0 -and $window.FindName('LogText').Tag.Visible -lt 20) 'Log did not reveal progressively.'
-    }
+    Assert-True ($window.FindName('LogText').Tag.Visible -gt 0 -and $window.FindName('LogText').Tag.Visible -lt 20) 'Log did not reveal progressively.'
     for ($i=0; $i -lt 25; $i++) { Update-MonitorAnimation $window }
     Assert-True ($window.FindName('LogText').Text -ceq $snapshot.Log) 'Progressive reveal lost or fabricated log lines.'
     $snapshot.Log = (4..23 | ForEach-Object { "Synthetic line $_" }) -join "`r`n"
@@ -118,6 +120,9 @@ try {
         $state.Phase = $phase
         Update-MonitorView $window $snapshot
         Assert-True ($window.FindName('PhaseText').Text -ne '' -and $window.FindName('ProgressText').Text -eq '--') "Phase $phase displayed a stale percentage."
+        $index = $signal.Tag.Index
+        Update-MonitorAnimation $window
+        Assert-True ($signal.Tag.Index -eq $index+1) "Phase $phase stopped terminal animation."
     }
     $state.Status = 'WaitingForReboot'
     $state.Phase = 'RestartCountdown'
@@ -141,8 +146,8 @@ try {
         Assert-True (-not $window.FindName('StopButton').IsEnabled -and $window.FindName('ProgressText').Text -eq '--') "Terminal status $status fabricated progress or enabled stop."
         $index = $signal.Tag.Index
         Update-MonitorAnimation $window
-        Assert-True (-not $signal.Tag.Active -and $signal.Tag.Index -eq $index) "Terminal status $status keeps animating."
-        Assert-True ($window.FindName('LogoGlow').Opacity -eq 0 -and $window.FindName('ScanBand').Opacity -eq 0) "Terminal status $status left an animation visible."
+        Assert-True ($signal.Tag.Index -eq $index+1) "Terminal status $status stopped decorative animation."
+        Assert-True ($window.FindName('LogoGlow').Opacity -eq 0.20 -and $window.FindName('ProgressText').Text -eq '--') "Terminal status $status lost illumination or fabricated progress."
     }
     $state.Status = 'Blocked'
     $state.ActiveOperation = 'Install'
