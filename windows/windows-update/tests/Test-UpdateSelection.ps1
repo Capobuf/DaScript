@@ -119,6 +119,10 @@ $driver.Type = 2
 Assert-True (@(Select-TestUpdate $state $driver).Count -eq 1) 'Optional firmware driver was excluded.'
 $state.IncludeDrivers = $false
 Assert-True (@(Select-TestUpdate $state $driver).Count -eq 0) 'Explicit driver exclusion was ignored.'
+Assert-True (@($state.Skipped).Count -eq 1) 'Excluded driver was not reported.'
+$emptySearch = [pscustomobject]@{Updates=[pscustomobject]@{Count=0}}
+$null = @(Get-Candidates $state $emptySearch $win11)
+Assert-True (@($state.Skipped).Count -eq 0) 'An offer absent from the latest scan remained excluded in the final result.'
 foreach ($name in @('IncludeDrivers', 'IncludeOptional')) {
     $parameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq $name }
     Assert-True ($parameter.DefaultValue.Extent.Text -eq '$true') ("Default $name must include updates.")

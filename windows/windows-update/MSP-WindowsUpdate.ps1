@@ -53,10 +53,11 @@ $script:StatePath = Join-Path $script:Root 'state.json'
 $script:BackupPath = Join-Path $script:Root 'state.json.bak'
 $script:StopPath = Join-Path $script:Root 'stop.request'
 $script:LogPath = Join-Path $script:Root 'activity.log'
-$script:ControlLockPath = Join-Path $script:Root 'control.lock'
-$script:WorkerLockPath = Join-Path $script:Root 'worker.lock'
+$script:ControlLockName = 'Global\MSP-WindowsUpdate-Control'
+$script:WorkerLockName = 'Global\MSP-WindowsUpdate-Worker'
 $script:NotificationPath = Join-Path $script:Root 'completion-notified'
-$script:TerminalStates = @('Completed', 'CompletedWithErrors', 'Blocked', 'Stopped')
+$script:ResultReadPath = Join-Path $script:Root 'result-read'
+$script:TerminalStates = @('Completed', 'CompletedWithExclusions', 'CompletedWithErrors', 'Blocked', 'Stopped')
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -143,6 +144,7 @@ function Initialize-RuntimeState {
     $defaults = @{
         OperationTimeoutMinutes=180; RebootDelaySeconds=90; RebootCommitted=$false
         ActiveOperation=''; OperationBootId=''; ProgressPercent=-1; MonitorEnabled=$false
+        OperationStartedUtc=''; OperationProcessId=0; CleanupError=''; ParentCreated=$false
     }
     foreach ($name in $defaults.Keys) {
         if ($null -eq $State.PSObject.Properties[$name]) {
@@ -151,18 +153,29 @@ function Initialize-RuntimeState {
     }
 }
 
-function Enter-FileLock {
-    param([string]$Path, [int]$TimeoutSeconds = 5)
-    $clock = [Diagnostics.Stopwatch]::StartNew()
-    do {
-        try { return [IO.File]::Open($Path, 'OpenOrCreate', 'ReadWrite', 'None') }
-        catch [IO.IOException] {
-            if ($clock.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-                throw "Another operation holds $Path. Retry after it finishes."
-            }
-            Start-Sleep -Milliseconds 100
-        }
-    } while ($true)
+function Enter-RunLock {
+    param([string]$Name, [int]$TimeoutSeconds = 5)
+    # Kernel objects leave no lock files and protect cleanup across Windows sessions.
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
+    }
+    $created = $false
+    $mutex = [Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+    try {
+        try { $owned = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw [TimeoutException]::new("Another operation holds $Name. Retry after it finishes.") }
+        return $mutex
+    } catch { $mutex.Dispose(); throw }
+}
+
+function Exit-RunLock {
+    param([Threading.Mutex]$Mutex)
+    if ($null -ne $Mutex) {
+        try { $Mutex.ReleaseMutex() } finally { $Mutex.Dispose() }
+    }
 }
 
 function Initialize-WuaCallback {
@@ -236,6 +249,8 @@ function Invoke-WuaOperation {
     $callback = New-Object MSPWindowsUpdate.Callback
     $State.ActiveOperation = $Operation
     $State.OperationBootId = Get-BootId
+    $State.OperationStartedUtc = [DateTime]::UtcNow.ToString('o')
+    $State.OperationProcessId = $PID
     $State.ProgressPercent = -1
     Save-State $State
     $job = $null
@@ -341,9 +356,22 @@ function Set-Phase {
 }
 
 function Get-BootId {
-    # LastBootUpTime changes after each reboot, unlike a persistent run identifier.
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem
-    return $os.LastBootUpTime.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+    # Compare a recorded boot event, not a freshly computed wall-clock boot time.
+    $boot = Get-WinEvent -FilterHashtable @{
+        LogName='System'; ProviderName='Microsoft-Windows-Kernel-General'; Id=12
+    } -MaxEvents 1 -ErrorAction Stop
+    if ($null -eq $boot.RecordId -or $null -eq $boot.TimeCreated) {
+        throw 'Cannot identify the Windows boot from System event 12.'
+    }
+    return ('event12:{0}:{1}' -f $boot.RecordId, $boot.TimeCreated.ToUniversalTime().Ticks)
+}
+
+function Test-BootChanged {
+    param([string]$Previous, [string]$Current)
+    if ($Previous -notmatch '^event12:\d+:\d+$' -or $Current -notmatch '^event12:\d+:\d+$') {
+        throw 'Boot evidence is missing or uses an older state format. Recovery requires operator verification.'
+    }
+    return ($Previous -ne $Current)
 }
 
 function Format-HResult {
@@ -402,13 +430,14 @@ function Test-UpdateRebootPending {
 }
 
 function Remove-TaskSafely {
-    param([string]$Name = $script:TaskName)
+    param([string]$Name = $script:TaskName, [switch]$Strict)
     try {
-        $task = Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue
+        $task = Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -eq $Name }
         if ($null -ne $task) {
-            Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction Stop
+            Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false -ErrorAction Stop
         }
     } catch {
+        if ($Strict) { throw }
         Write-Log ('Task cleanup failed: ' + $_.Exception.Message) 'WARN'
     }
 }
@@ -418,6 +447,75 @@ function Finish-Run {
     $State.Status = $Status
     Set-Phase $State $Status $Message
     Remove-TaskSafely
+}
+
+function Complete-UpdateRun {
+    param([object]$State, [object]$Platform)
+    $errors = @($State.Failures | Where-Object { -not $_.Resolved }).Count
+    $excluded = @($State.Skipped).Count
+    $status = if ($errors) { 'CompletedWithErrors' } elseif ($excluded) { 'CompletedWithExclusions' } else { 'Completed' }
+    $message = "Two scans found no further eligible updates; failures=$errors, excluded=$excluded."
+    if ($State.Windows11UpgradeRequested -and -not $Platform.IsWindows11) {
+        $State.Windows11UpgradeStatus = if ($State.Windows11UpgradeOffered) { 'NotCompleted' } else { 'NotOffered' }
+        $message += " Windows 11 upgrade: $($State.Windows11UpgradeStatus)."
+        # An unavailable offer is not an installation failure; an unfulfilled upgrade needs attention.
+        $upgradeExcluded = @($State.Skipped | Where-Object { $_.Title -match '\bWindows\s+11\b' }).Count -gt 0
+        if ($State.Windows11UpgradeOffered -and -not $upgradeExcluded) { $status = 'CompletedWithErrors' }
+        elseif (-not $errors) { $status = 'CompletedWithExclusions' }
+    }
+    Finish-Run $State $status $message
+}
+
+function Remove-RunArtifacts {
+    [CmdletBinding()]
+    param([object]$State)
+    # Called while holding the worker mutex; Start cannot race with directory removal.
+    $control = Enter-RunLock $script:ControlLockName
+    try {
+        $current = Get-State
+        if ($null -eq $current -or $current.RunId -ne $State.RunId) { return }
+        Initialize-RuntimeState $current
+        if ($current.Status -notin $script:TerminalStates -or $current.ActiveOperation -or $current.RebootCommitted) { return }
+        $State.CleanupError = ''
+        $root = [IO.Path]::GetFullPath($script:Root).TrimEnd('\')
+        $expected = [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'MSPTools\WindowsUpdate')).TrimEnd('\')
+        if ($root -ne $expected) { throw 'Cleanup refused an unexpected runtime directory.' }
+        $parent = [IO.Directory]::GetParent($root).FullName
+        foreach ($path in @($parent, $root)) {
+            if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Cleanup refused a redirected runtime directory.'
+            }
+        }
+        $names = @('MSP-WindowsUpdate.ps1', 'state.json', 'state.json.bak', 'activity.log',
+            'stop.request', 'completion-notified', 'result-read', 'control.lock', 'worker.lock')
+        $files = @(Get-ChildItem -LiteralPath $root -Force)
+        foreach ($file in $files) {
+            if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                ($file.Name -notin $names -and $file.Name -notmatch '^state\.[a-f0-9]{32}\.tmp$')) {
+                throw ('Cleanup refused an unrecognized entry: ' + $file.Name)
+            }
+        }
+        Remove-TaskSafely $script:MonitorTaskName -Strict
+        Remove-TaskSafely $script:TaskName -Strict
+        # Keep the recovery state until other files have been removed successfully.
+        foreach ($file in $files | Where-Object { $_.Name -notin @('state.json', 'state.json.bak') }) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+        }
+        foreach ($path in @($script:BackupPath, $script:StatePath)) {
+            if ([IO.File]::Exists($path)) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+        }
+        [IO.Directory]::Delete($root, $false)
+        if ($current.ParentCreated -and @(Get-ChildItem -LiteralPath $parent -Force).Count -eq 0) {
+            [IO.Directory]::Delete($parent, $false)
+        }
+    } catch {
+        $State.CleanupError = $_.Exception.Message
+        if (Test-Path -LiteralPath $script:Root) {
+            Save-State $State
+            Write-Log ('Cleanup incomplete: ' + $State.CleanupError) 'ERROR'
+        }
+        Write-Warning ('Cleanup incomplete: ' + $State.CleanupError)
+    } finally { Exit-RunLock $control }
 }
 
 function Test-StopRequested {
@@ -461,7 +559,7 @@ function Schedule-Reboot {
         Start-Sleep -Milliseconds 250
     }
     # Stop and the final reboot decision share this lock. Only this worker writes state.
-    $control = Enter-FileLock $script:ControlLockPath
+    $control = Enter-RunLock $script:ControlLockName
     try {
         if (Test-StopRequested $State) { return }
         $State.Reboots = [int]$State.Reboots + 1
@@ -474,7 +572,7 @@ function Schedule-Reboot {
             Finish-Run $State 'Blocked' ("Windows refused the reboot (exit code $exitCode).")
         }
     } finally {
-        $control.Dispose()
+        Exit-RunLock $control
     }
 }
 
@@ -496,6 +594,8 @@ function Test-FeatureUpgrade {
 
 function Get-Candidates {
     param([object]$State, [object]$SearchResult, [object]$Platform)
+    # Report exclusions from the latest successful scan, not superseded offers.
+    $State.Skipped = @()
     $regular = [Collections.Generic.List[object]]::new()
     $exclusive = [Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $SearchResult.Updates.Count; $index++) {
@@ -652,18 +752,21 @@ function Invoke-WorkerCore {
     if ($state.Status -in $script:TerminalStates) { return }
     try {
         $bootId = Get-BootId
+        Write-Log ("Worker started: PID=$PID; boot=$bootId; status=$($state.Status).")
         if ($state.ActiveOperation) {
-            if ($state.OperationBootId -eq $bootId) {
+            if (-not (Test-BootChanged $state.OperationBootId $bootId)) {
                 Finish-Run $state 'Blocked' 'Previous WUA operation ended unexpectedly; its outcome is unknown. No new operation will start on this boot.'
                 return
             }
+            Write-Log ("Previous $($state.ActiveOperation) was not finalized (PID=$($state.OperationProcessId), started=$($state.OperationStartedUtc), boot=$($state.OperationBootId)); new Windows boot confirmed: $bootId. Checking actual update state.") 'WARN'
             $state.ActiveOperation = ''
+            $state.OperationBootId = ''
             $state.ProgressPercent = -1
-            Write-Log 'Reboot detected after an interrupted WUA operation; checking actual update state.' 'WARN'
+            Save-State $state
         }
         if (-not $state.RebootCommitted -and (Test-StopRequested $state)) { return }
         if ($state.Status -eq 'WaitingForReboot') {
-            if ($bootId -eq [string]$state.RebootBootId) {
+            if (-not (Test-BootChanged $state.RebootBootId $bootId)) {
                 # Report an aborted/missed restart instead of waiting forever.
                 $elapsed = ([DateTime]::UtcNow - [DateTime]::Parse([string]$state.RebootRequestedUtc).ToUniversalTime()).TotalMinutes
                 if ($elapsed -gt 15) {
@@ -726,26 +829,7 @@ function Invoke-WorkerCore {
                     Start-Sleep -Seconds 20
                     continue
                 }
-                $openFailures = @($state.Failures | Where-Object { -not $_.Resolved })
-                $skippedAttention = @($state.Skipped | Where-Object {
-                    $_.Reason -eq 'Update may require interactive input' -or
-                    $_.Reason -eq 'Unable to classify optional update safely' -or
-                    $_.Reason -eq 'Unable to identify target Windows version safely'
-                })
-                if ([bool]$state.Windows11UpgradeRequested -and -not $platform.IsWindows11) {
-                    if ([bool]$state.Windows11UpgradeOffered) {
-                        $state.Windows11UpgradeStatus = 'NotCompleted'
-                        $upgradeMessage = 'Windows 11 upgrade was offered but the system is still Windows 10.'
-                    } else {
-                        $state.Windows11UpgradeStatus = 'NotOffered'
-                        $upgradeMessage = 'No identifiable Windows 11 upgrade was offered by the configured update source.'
-                    }
-                    Finish-Run $state 'CompletedWithErrors' ("$upgradeMessage No more eligible updates; failures=$($openFailures.Count), requires-attention=$($skippedAttention.Count).")
-                } elseif ($openFailures.Count -gt 0 -or $skippedAttention.Count -gt 0) {
-                    Finish-Run $state 'CompletedWithErrors' ("No more eligible updates; failures=$($openFailures.Count), requires-attention=$($skippedAttention.Count).")
-                } else {
-                    Finish-Run $state 'Completed' 'Two scans found no further eligible updates in the configured source.'
-                }
+                Complete-UpdateRun $state $platform
                 return
             }
             $state.EmptyScans = 0
@@ -783,10 +867,24 @@ function Invoke-WorkerCore {
 
 function Invoke-Worker {
     Assert-Administrator
-    try { $workerLock = Enter-FileLock $script:WorkerLockPath -TimeoutSeconds 0 }
-    catch { return }
-    try { Invoke-WorkerCore }
-    finally { $workerLock.Dispose() }
+    try { $workerLock = Enter-RunLock $script:WorkerLockName -TimeoutSeconds 0 }
+    catch [TimeoutException] { return }
+    try {
+        Invoke-WorkerCore
+        $state = Get-State
+        if ($null -ne $state) {
+            Initialize-RuntimeState $state
+            if ($state.Status -in $script:TerminalStates -and -not $state.ActiveOperation -and -not $state.RebootCommitted) {
+                # Give an open monitor a bounded opportunity to keep the result in memory.
+                if ($state.MonitorEnabled) {
+                    for ($wait = 0; $wait -lt 10 -and -not (Test-Path -LiteralPath $script:ResultReadPath); $wait++) {
+                        Start-Sleep -Seconds 1
+                    }
+                }
+                Remove-RunArtifacts $state
+            }
+        }
+    } finally { Exit-RunLock $workerLock }
 }
 
 function Initialize-Directory {
@@ -813,19 +911,23 @@ function Invoke-Start {
         if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
             throw 'An interactive desktop is required for the monitor. Use -NoMonitor for unattended deployment.'
         }
-        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
     }
-    Initialize-Directory
-    $startupLock = Enter-FileLock $script:WorkerLockPath -TimeoutSeconds 0
+    $null = Get-BootId
+    $startupLock = Enter-RunLock $script:WorkerLockName -TimeoutSeconds 0
     $control = $null
+    $state = $null
     try {
+        $parentCreated = -not (Test-Path -LiteralPath (Split-Path -Parent $script:Root))
+        Initialize-Directory
         $previous = Get-State
         if ($null -ne $previous) {
             Initialize-RuntimeState $previous
-            if ($previous.ActiveOperation -and $previous.OperationBootId -eq (Get-BootId)) {
+            $parentCreated = $parentCreated -or $previous.ParentCreated
+            if ($previous.ActiveOperation -and (-not (Test-BootChanged $previous.OperationBootId (Get-BootId)))) {
                 throw 'A previous WUA operation has an unknown outcome on this boot. Resolve it before starting another run.'
             }
-            if ($previous.RebootCommitted -and $previous.RebootBootId -eq (Get-BootId)) {
+            if ($previous.RebootCommitted -and (-not (Test-BootChanged $previous.RebootBootId (Get-BootId)))) {
                 throw 'A restart has already been committed on this boot. A new run cannot start until its outcome is resolved.'
             }
         }
@@ -835,16 +937,17 @@ function Invoke-Start {
             return
         }
         $upgradeRequested = Get-Windows11UpgradeChoice $platform $Windows11Upgrade
-        $control = Enter-FileLock $script:ControlLockPath
+        $control = Enter-RunLock $script:ControlLockName
         Remove-TaskSafely
         Remove-TaskSafely $script:MonitorTaskName
+        if (Test-Path -LiteralPath $script:ResultReadPath) { Remove-Item -LiteralPath $script:ResultReadPath -Force }
         if (Test-Path -LiteralPath $script:NotificationPath) { Remove-Item -LiteralPath $script:NotificationPath -Force }
         if (Test-Path -LiteralPath $script:StopPath) { Remove-Item -LiteralPath $script:StopPath -Force }
         if ([IO.Path]::GetFullPath($PSCommandPath) -ne [IO.Path]::GetFullPath($script:WorkerPath)) {
             Copy-Item -LiteralPath $PSCommandPath -Destination $script:WorkerPath -Force
         }
         $state = [pscustomobject]@{
-            Version=4; RunId=[Guid]::NewGuid().ToString('N'); Status='Running'
+            Version=5; RunId=[Guid]::NewGuid().ToString('N'); Status='Running'
             Phase='Queued'; Message='Queued for installation'; UpdatedUtc=''
             StartedUtc=[DateTime]::UtcNow.ToString('o'); Scans=0; EmptyScans=0
             Reboots=0; RebootBootId=''; RebootRequestedUtc=''; ConsecutiveErrors=0; LastError=''
@@ -853,7 +956,8 @@ function Invoke-Start {
             IncludeOptional=([bool]$IncludeOptional -and -not $ExcludeOptional)
             OperationTimeoutMinutes=$OperationTimeoutMinutes; RebootDelaySeconds=$RebootDelaySeconds
             RebootCommitted=$false; ActiveOperation=''; OperationBootId=''; ProgressPercent=-1
-            MonitorEnabled=(-not $NoMonitor)
+            MonitorEnabled=(-not $NoMonitor); ParentCreated=$parentCreated; CleanupError=''
+            OperationStartedUtc=''; OperationProcessId=0
             IncludeFeatureUpgrades=[bool]$IncludeFeatureUpgrades
             Windows11UpgradeRequested=$upgradeRequested
             Windows11UpgradeOffered=$false
@@ -889,9 +993,16 @@ function Invoke-Start {
             Remove-TaskSafely $script:MonitorTaskName
             throw
         }
+    } catch {
+        if ($null -ne $state) {
+            $state.Status = 'Blocked'
+            Set-Phase $state 'Blocked' ('Startup failed: ' + $_.Exception.Message)
+            Remove-RunArtifacts $state
+        }
+        throw
     } finally {
-        if ($null -ne $control) { $control.Dispose() }
-        $startupLock.Dispose()
+        Exit-RunLock $control
+        Exit-RunLock $startupLock
     }
     Start-ScheduledTask -TaskName $script:TaskName
     Write-Host ('Started. Logs: ' + $script:LogPath)
@@ -917,13 +1028,13 @@ function Show-Status {
         Windows11Upgrade=$state.Windows11UpgradeStatus
         ActiveOperation=$state.ActiveOperation; ProgressPercent=$state.ProgressPercent
         StartedUtc=$state.StartedUtc; UpdatedUtc=$state.UpdatedUtc
-        Log=$script:LogPath
+        Log=$script:LogPath; CleanupError=$state.CleanupError
     } | Format-List | Out-Host
 }
 
 function Invoke-Stop {
     Assert-Administrator
-    $control = Enter-FileLock $script:ControlLockPath
+    $control = Enter-RunLock $script:ControlLockName
     try {
         $state = Get-State
         if ($null -eq $state) { throw 'No active run found.' }
@@ -941,8 +1052,8 @@ function Invoke-Stop {
         } else {
             Write-Host 'Stop requested. The worker will stop before the next operation or restart; an active installation may finish first.'
         }
-    } finally { $control.Dispose() }
-    # Wake an idle worker; the task and file lock prevent concurrent execution.
+    } finally { Exit-RunLock $control }
+    # Wake an idle worker; the task and mutex prevent concurrent execution.
     $task = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
     if ($null -ne $task) {
         Start-ScheduledTask -TaskName $script:TaskName
@@ -971,18 +1082,1178 @@ function Play-CompletionSound {
 
 function Send-CompletionSound {
     param([object]$State)
-    if ($State.Status -ne 'Completed' -or $State.ActiveOperation) { return }
-    $control = Enter-FileLock $script:ControlLockPath
+    if ($State.Status -notin @('Completed', 'CompletedWithExclusions') -or $State.ActiveOperation) { return }
+    $control = Enter-RunLock $script:ControlLockName
     try {
         $current = Get-State
-        if ($current.RunId -ne $State.RunId -or $current.Status -ne 'Completed') { return }
+        if ($null -eq $current -or $current.RunId -ne $State.RunId -or $current.Status -notin @('Completed', 'CompletedWithExclusions')) { return }
         $marker = [IO.File]::Open($script:NotificationPath, 'CreateNew', 'Write', 'None')
         $marker.Dispose()
     } catch [IO.IOException] { return }
-    finally { $control.Dispose() }
+    finally { Exit-RunLock $control }
     # Sound belongs to the interactive session and depends on its audio settings.
     try { Play-CompletionSound }
     catch { Write-Warning ('Completion sound unavailable: ' + $_.Exception.Message) }
+}
+
+function Get-MonitorLogoGeometry {
+    # Exact path from the supplied SVG, compressed only to keep the single-file payload compact.
+    $encoded = @'
+H4sIAAAAAAAACpS9x7Etya4kqkoqUGbJiQJ/1nqUBDVo6b85qAMRa7/Xg7vvqZUsKIjDgfj/1mX5
+P/d2L9u3/7f9+8/23/Hv+d8/27/bf/8c/3f5P/d6LPu6/bfrpe2/7d8dl4///jnw0z87bjruZV9P
+fX7HNXle/vOf7f8u/+d6rmXfLnnBcO17l32Lj/+z02t2vVW+OD553+eyb1s8eei/Tr3LH+/tQYOv
+Z1/27fvP3h8tWZd9X+VX/p5/7rrkso6CNwyDdN3vsu/2efkyde+9l32//tuzF/IE3vX2EZO2vbj0
+4NL534nJkFHTcV5lqKSvpw3VZOSkFfL0ZU/nGLb/bCOcrZTJv3Zpu/VL/1g3aRRkLZThksa+hzx8
+oCX/u0dkWo4YR1uMfOOOJsrQorv+b1+nB32oPWV9j9ufddmPq4xfrG0fBxmC413246YbbYxjon0Q
+ZSFcuNtuvOzumBbu/RkPyzzaoviW/dx9qcSv27KfNih1ae5xz/nKPaf2ZD6b14sXSVf4Jhr9a9kv
+Wz97kQKyR7MNutxsKHSt287L9Z9ra7be6m5832W/sEXk7TKvZV9e27Jf/HWeCP8a9yhH9JE341od
+fxMNsZRkYdsz57Lfaw4THipraKfdeNruOHW/+RbJVuZuvGg3yvrPV2Yf/Ool4xItCdHms8LtF1F4
+SFuyBdkqkRY+X2gk/nHGK2btObEsuSn3d8naOboQaLti/qUmkXkwcxfEGPg+uk8dvJsEeGzi7Los
+2/uuox2bOnbSL0nwQHDcIm55xnS1NMVTRch6L/stIpzHoMoR+ddJYmf7/UxVOCKA8kGIofuLZ3Za
+D7ylYvyOZX9EUaArl62n+172x7p69W0aW9n23LrsTxtVNg5EuqWAeo/s+SkLBt/6um62sb14TeD2
+6zzkHX67CHLdentbrz608pVjX/bPbtbvH786dH7L/pmQ0S0dYsAl3PPWzWz6Vdojv129HTJJxdJQ
+ZY37ZN+8z7K/r/ebJEOVBz/VcbF1vmu2xmK4/XJKCV5AeB7zET9sbYJcWNgGP//95/rvplf5fA0y
+S3b4bh1GO8s4kt4qq4A/4gPB0jxNBFGXPtyykI9j2d1e9Z1qW6PrSNt8TWjcx7ccaygSG04WKrtf
+p4U17NHQM/uz7N8DlX/2OUjlJOOzHsux8vZtO/fA9dgIE9P1PLPltr+7fIxWvcuxxlzIXdFLfde3
+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
+5y9e/I8CAA==
+'@
+    $inputStream = [IO.MemoryStream]::new([Convert]::FromBase64String($encoded))
+    $zip = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
+    $reader = [IO.StreamReader]::new($zip, [Text.Encoding]::UTF8)
+    try {
+        $geometry = [Windows.Media.Geometry]::Parse($reader.ReadToEnd())
+        $geometry.Freeze()
+        return $geometry
+    } finally { $reader.Dispose(); $zip.Dispose(); $inputStream.Dispose() }
+}
+
+function New-MonitorWindow {
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+    if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+        throw 'The WPF monitor requires STA. Run powershell.exe -STA -File MSP-WindowsUpdate.ps1 -Action Monitor.'
+    }
+    [xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="SPETTRO // Windows Update" Width="900" Height="540" MinWidth="640" MinHeight="480"
+        WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
+        Background="#090B09" Foreground="#E5C56C" FontFamily="Consolas" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="23" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </shell:WindowChrome.WindowChrome>
+  <Window.Resources>
+    <SolidColorBrush x:Key="Ink" Color="#E5C56C"/>
+    <SolidColorBrush x:Key="Muted" Color="#B0A074"/>
+    <SolidColorBrush x:Key="Accent" Color="#F0CD67"/>
+    <SolidColorBrush x:Key="Rule" Color="#6E5C2A"/>
+    <SolidColorBrush x:Key="Warning" Color="#FFE28A"/>
+    <SolidColorBrush x:Key="Error" Color="#FF9987"/>
+    <SolidColorBrush x:Key="Success" Color="#B7D3A2"/>
+    <DrawingBrush x:Key="Hatch" TileMode="Tile" Viewport="0,0,8,8" ViewportUnits="Absolute" Viewbox="0,0,8,8" ViewboxUnits="Absolute">
+      <DrawingBrush.Drawing><GeometryDrawing Brush="#A78A37" Geometry="M 0,0 L 3,0 8,5 8,8 Z M 0,5 L 3,8 0,8 Z"/></DrawingBrush.Drawing>
+    </DrawingBrush>
+    <Style x:Key="Technical" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
+    </Style>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Rule}"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="3,2"/><Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#DAC066"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#FFF0B6"/><Setter TargetName="Frame" Property="BorderThickness" Value="2"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#FFF0B6"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ChromeButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Width" Value="32"/><Setter Property="Padding" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="BorderThickness" Value="0"/><Setter Property="Focusable" Value="False"/>
+      <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="#15170F"/><Setter Property="Width" Value="12"/>
+      <Setter Property="Template">
+        <Setter.Value><ControlTemplate TargetType="ScrollBar">
+          <Grid Background="{TemplateBinding Background}">
+            <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
+              <Track.DecreaseRepeatButton><RepeatButton x:Name="PageBefore" Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False"/></Track.DecreaseRepeatButton>
+              <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb"><Border Background="#8D783B" Margin="2"/></ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+              <Track.IncreaseRepeatButton><RepeatButton x:Name="PageAfter" Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False"/></Track.IncreaseRepeatButton>
+            </Track>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+              <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+              <Setter TargetName="PageBefore" Property="Command" Value="ScrollBar.PageLeftCommand"/>
+              <Setter TargetName="PageAfter" Property="Command" Value="ScrollBar.PageRightCommand"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value>
+      </Setter>
+      <Style.Triggers><Trigger Property="Orientation" Value="Horizontal"><Setter Property="Height" Value="12"/><Setter Property="Width" Value="Auto"/></Trigger></Style.Triggers>
+    </Style>
+    <Style TargetType="ProgressBar">
+      <Setter Property="Foreground" Value="{StaticResource Accent}"/><Setter Property="Background" Value="#292817"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ProgressBar">
+        <Grid ClipToBounds="True">
+          <Border x:Name="PART_Track" Background="{TemplateBinding Background}"/>
+          <Border x:Name="PART_Indicator" HorizontalAlignment="Left" Background="{TemplateBinding Foreground}"/>
+          <Rectangle IsHitTestVisible="False"><Rectangle.Fill>
+            <DrawingBrush TileMode="Tile" Viewport="0,0,7,12" ViewportUnits="Absolute" Viewbox="0,0,7,12" ViewboxUnits="Absolute">
+              <DrawingBrush.Drawing><GeometryDrawing Brush="#090B09" Geometry="M 5,0 L 7,0 7,12 5,12 Z"/></DrawingBrush.Drawing>
+            </DrawingBrush>
+          </Rectangle.Fill></Rectangle>
+        </Grid>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+  <Border BorderBrush="#6E5C2A" BorderThickness="1">
+    <Grid>
+      <Grid.RowDefinitions><RowDefinition Height="23"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid x:Name="AmbientField" Grid.RowSpan="3" ClipToBounds="True" IsHitTestVisible="False">
+        <Grid x:Name="LogoHost" Margin="48,28" IsHitTestVisible="False">
+          <Path x:Name="LogoPath" Fill="{StaticResource Accent}" Opacity="0.16" Stretch="Uniform" AutomationProperties.Name="Logo">
+            <Path.CacheMode><BitmapCache/></Path.CacheMode>
+          </Path>
+          <Path x:Name="LogoGlow" Data="{Binding Data, ElementName=LogoPath}" Stretch="Uniform" Opacity="0">
+            <Path.Fill>
+              <LinearGradientBrush x:Name="LogoLight" StartPoint="0,-0.4" EndPoint="0,0">
+                <GradientStop Color="#00F0CD67" Offset="0"/>
+                <GradientStop Color="#FFF0CD67" Offset="0.5"/>
+                <GradientStop Color="#00F0CD67" Offset="1"/>
+              </LinearGradientBrush>
+            </Path.Fill>
+          </Path>
+        </Grid>
+        <TextBlock x:Name="NoiseText" FontSize="11" LineHeight="14" LineStackingStrategy="BlockLineHeight" Foreground="#8D783B" Opacity="0.25" VerticalAlignment="Top" HorizontalAlignment="Left">
+          <TextBlock.RenderTransform><TranslateTransform x:Name="NoiseShift"/></TextBlock.RenderTransform>
+        </TextBlock>
+        <Border x:Name="ScanBand" Height="26" VerticalAlignment="Top" Background="#D4B654" Opacity="0">
+          <Border.RenderTransform><TranslateTransform x:Name="ScanShift"/></Border.RenderTransform>
+        </Border>
+      </Grid>
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock Text="// SPETTRO" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="12,0"/>
+        <Button x:Name="MinimizeButton" Grid.Column="1" Content="_" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Riduci a icona"/>
+        <Button x:Name="MaximizeButton" Grid.Column="2" Content="[]" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Ingrandisci o ripristina"/>
+        <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Chiudi finestra"/>
+      </Grid>
+      <ScrollViewer Grid.Row="1" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid MinHeight="380" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <TextBlock x:Name="RunText" FontSize="10" Foreground="#8F7F4A" Margin="0,1,0,2"/>
+
+          <WrapPanel Grid.Row="1" Margin="0,2,0,1">
+            <TextBlock Text="&gt; " Foreground="{StaticResource Muted}"/>
+            <TextBlock x:Name="PhaseText" Text="IN ATTESA" FontWeight="Bold"/>
+            <TextBlock Text="   [" Foreground="{StaticResource Muted}"/>
+            <TextBlock x:Name="StatusText" Text="LETTURA STATO"/>
+            <TextBlock Text="]   " Foreground="{StaticResource Muted}"/>
+            <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
+            <TextBlock Text="  "/>
+            <TextBlock x:Name="ProgressCaption" Text="NON DISPONIBILE" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Bottom"/>
+          </WrapPanel>
+          <StackPanel Grid.Row="2">
+            <Grid Height="5" Width="274" HorizontalAlignment="Left" Margin="13,2,0,3">
+              <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="Avanzamento operazione WUA"/>
+              <Border x:Name="Activity" Background="{StaticResource Accent}" Width="7" HorizontalAlignment="Left" Visibility="Collapsed"/>
+            </Grid>
+            <TextBlock x:Name="PhaseDetail" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
+            <WrapPanel Margin="0,2,0,2" TextElement.FontSize="12" TextElement.Foreground="{StaticResource Muted}">
+              <TextBlock Text="installati: "/><TextBlock x:Name="InstalledCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
+              <TextBlock Text="errori: "/><TextBlock x:Name="FailureCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
+              <TextBlock Text="esclusi: "/><TextBlock x:Name="SkippedCount" Text="--" Foreground="{StaticResource Ink}" Margin="0,0,16,0"/>
+              <TextBlock Text="riavvii: "/><TextBlock x:Name="RebootCount" Text="--" Foreground="{StaticResource Ink}"/>
+            </WrapPanel>
+          </StackPanel>
+          <ScrollViewer Grid.Row="3" MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
+            <TextBlock x:Name="DetailText" Text="Lettura stato..." TextWrapping="Wrap"/>
+          </ScrollViewer>
+          <TextBlock Grid.Row="4" Text="&gt;&gt; activity.log --tail 60" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
+          <Grid x:Name="TerminalField" Grid.Row="5" ClipToBounds="True" MinHeight="110">
+            <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
+                   FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
+                   HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Registro attivita e riepilogo" SelectionBrush="#8D783B"/>
+            <TextBlock x:Name="TearNoise" Text="___//__    ::  ||| /   _  ::::    ///____  |:|   __//__" Foreground="#F0CD67" FontSize="11" Opacity="0" IsHitTestVisible="False" HorizontalAlignment="Right" VerticalAlignment="Top">
+              <TextBlock.RenderTransform><TranslateTransform x:Name="TearNoiseShift"/></TextBlock.RenderTransform>
+            </TextBlock>
+          </Grid>
+        </Grid>
+      </ScrollViewer>
+      <StackPanel Grid.Row="2" Margin="12,3,12,7">
+        <ScrollViewer MaxHeight="50" VerticalScrollBarVisibility="Auto">
+          <TextBlock x:Name="NoticeText" Text="Chiudere il monitor non arresta il worker." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11"/>
+        </ScrollViewer>
+        <WrapPanel Margin="0,4,0,0" VerticalAlignment="Center">
+          <TextBlock Text="&gt;&gt; " VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
+          <Button x:Name="StopButton" Content="_ARRESTA [alt+a]" IsEnabled="False" ToolTip="Stop cooperativo: l'installazione in corso puo terminare prima dell'arresto."/>
+          <TextBlock Text=" / " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
+          <Button x:Name="CloseButton" Content="_CHIUDI [alt+c]" ToolTip="Chiude solo il monitor; il worker continua."/>
+          <TextBlock x:Name="PromptCursor" Text="_" Margin="6,0,0,0" VerticalAlignment="Center"/>
+        </WrapPanel>
+      </StackPanel>
+      <Rectangle Grid.Row="1" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="0.045"><Rectangle.Fill>
+        <DrawingBrush TileMode="Tile" Viewport="0,0,4,4" ViewportUnits="Absolute" Viewbox="0,0,4,4" ViewboxUnits="Absolute">
+          <DrawingBrush.Drawing><GeometryDrawing Brush="#BDA04B" Geometry="M 0,0 L 4,0 4,1 0,1 Z"/></DrawingBrush.Drawing>
+        </DrawingBrush>
+      </Rectangle.Fill></Rectangle>
+    </Grid>
+  </Border>
+
+</Window>
+'@
+    $reader = [Xml.XmlNodeReader]::new($xaml)
+    try { $window = [Windows.Markup.XamlReader]::Load($reader) }
+    finally { $reader.Dispose() }
+    $area = [Windows.SystemParameters]::WorkArea
+    $window.MinWidth = [Math]::Min($window.MinWidth, $area.Width)
+    $window.MinHeight = [Math]::Min($window.MinHeight, $area.Height)
+    $window.Width = [Math]::Min($window.Width, $area.Width)
+    $window.Height = [Math]::Min($window.Height, $area.Height)
+    $window.FindName('MinimizeButton').add_Click({ param($sender, $eventArgs)
+        [Windows.SystemCommands]::MinimizeWindow([Windows.Window]::GetWindow($sender))
+    })
+    $window.FindName('MaximizeButton').add_Click({ param($sender, $eventArgs)
+        $target = [Windows.Window]::GetWindow($sender)
+        if ($target.WindowState -eq 'Maximized') { [Windows.SystemCommands]::RestoreWindow($target) }
+        else { [Windows.SystemCommands]::MaximizeWindow($target) }
+    })
+    $window.FindName('TitleCloseButton').add_Click({ param($sender, $eventArgs)
+        [Windows.SystemCommands]::CloseWindow([Windows.Window]::GetWindow($sender))
+    })
+    $geometry = Get-MonitorLogoGeometry
+    $window.FindName('LogoPath').Data = $geometry
+    $random = [Random]::new()
+    $alphabet = '.:/|_01#'
+    $noiseRows = @(for ($r=0; $r -lt 24; $r++) {
+        $row = [Text.StringBuilder]::new()
+        for ($c=0; $c -lt 192; $c++) {
+            $char = if ($random.Next(100) -lt 17) { $alphabet[$random.Next($alphabet.Length)] } else { ' ' }
+            [void]$row.Append($char)
+        }
+        $row.ToString()
+    })
+    $window.FindName('LogoHost').Tag = [pscustomobject]@{
+        Index=0L; Active=$false; Random=$random; LightY=-0.2; LightSpeed=0.012
+        NextTone=0L; LogoTone=0.16; NextNoise=0L; NoiseRows=$noiseRows; ScanY=0.0; ScanSpeed=4.0
+    }
+    $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
+    return $window
+}
+
+function Update-MonitorAnimation {
+    param([object]$Window)
+    $motion = $Window.FindName('LogoHost').Tag
+    $moving = $motion.Active -and $Window.WindowState -ne 'Minimized' -and [Windows.SystemParameters]::ClientAreaAnimation
+    Update-MonitorLog $Window -Immediate:(-not $moving)
+    if ($moving) {
+        $motion.Index++
+        $rng = $motion.Random
+        # Keep the supplied silhouette intact; only its illumination moves.
+        $motion.LightY += $motion.LightSpeed
+        if ($motion.LightY -gt 1.25) { $motion.LightY = -0.25; $motion.LightSpeed = 0.008+$rng.NextDouble()*0.008 }
+        $Window.FindName('LogoLight').StartPoint = [Windows.Point]::new(0, $motion.LightY-0.2)
+        $Window.FindName('LogoLight').EndPoint = [Windows.Point]::new(0, $motion.LightY+0.2)
+        $Window.FindName('LogoGlow').Opacity = 0.20
+        if ($motion.Index -ge $motion.NextTone) {
+            $motion.LogoTone = 0.13+$rng.NextDouble()*0.05
+            $motion.NextTone = $motion.Index+$rng.Next(9,36)
+        }
+        $base = $Window.FindName('LogoPath')
+        $base.Opacity += ($motion.LogoTone-$base.Opacity)*0.12
+        if ($motion.Index -ge $motion.NextNoise) {
+            $columns = [int][Math]::Ceiling([Math]::Max($Window.ActualWidth,$Window.Width)/6.6) + 4
+            $rows = [int][Math]::Ceiling([Math]::Max($Window.ActualHeight,$Window.Height)/14) + 4
+            $noise = @(for ($r=0; $r -lt $rows; $r++) {
+                $line = $motion.NoiseRows[$rng.Next($motion.NoiseRows.Count)]
+                ($line * [int][Math]::Ceiling($columns/192.0)).Substring(0,$columns)
+            })
+            $Window.FindName('NoiseText').Text = $noise -join "`n"
+            $motion.NextNoise = $motion.Index + $rng.Next(3,10)
+        }
+        $Window.FindName('NoiseShift').Y = -($motion.Index % 14)
+        $Window.FindName('NoiseShift').X = -($motion.Index % 3)*3
+        $burst = $rng.Next(45) -eq 0
+        $Window.FindName('TearNoise').Opacity = $(if ($burst) { 0.6 } else { 0 })
+        if ($burst) { $Window.FindName('TearNoiseShift').Y = $rng.NextDouble()*[Math]::Max(1,$Window.FindName('TerminalField').ActualHeight-15) }
+        $motion.ScanY += $motion.ScanSpeed
+        if ($motion.ScanY -gt $Window.ActualHeight) {
+            $motion.ScanY = -26
+            $motion.ScanSpeed = $rng.Next(3,12)
+        }
+        $Window.FindName('ScanBand').Opacity = 0.055
+        $Window.FindName('ScanShift').Y = $motion.ScanY
+        $Window.FindName('PromptCursor').Opacity = $(if ($motion.Index % 8 -lt 4) { 1.0 } else { 0.15 })
+    } else {
+        $Window.FindName('LogoPath').Opacity = 0.16
+        $Window.FindName('LogoGlow').Opacity = 0
+        $Window.FindName('TearNoise').Opacity = 0
+        $Window.FindName('ScanBand').Opacity = 0
+        $Window.FindName('NoiseShift').Y = 0
+        $Window.FindName('NoiseShift').X = 0
+        $Window.FindName('PromptCursor').Opacity = 1.0
+    }
+}
+
+function Update-MonitorLog {
+    param([object]$Window, [string]$Text, [switch]$AcceptSnapshot, [switch]$Immediate)
+    $log = $Window.FindName('LogText')
+    $buffer = $log.Tag
+    if ($AcceptSnapshot -and $Text -cne $buffer.Target) {
+        $lines = @([regex]::Split($Text, '\r?\n'))
+        if (-not $Text) { $lines = @() }
+        # Preserve the visible overlap when the worker's rolling 60-line tail advances.
+        $overlap = [Math]::Min($buffer.Lines.Count, $lines.Count)
+        while ($overlap -gt 0) {
+            $oldTail = $buffer.Lines[($buffer.Lines.Count-$overlap)..($buffer.Lines.Count-1)] -join "`r`n"
+            $newHead = $lines[0..($overlap-1)] -join "`r`n"
+            if ($oldTail -ceq $newHead) { break }
+            $overlap--
+        }
+        $buffer.Visible = [Math]::Max(0, $buffer.Visible - ($buffer.Lines.Count-$overlap))
+        $buffer.Target = $Text
+        $buffer.Lines = $lines
+    }
+    if ($Immediate -or -not [Windows.SystemParameters]::ClientAreaAnimation) {
+        $buffer.Visible = $buffer.Lines.Count
+    } elseif ($buffer.Visible -lt $buffer.Lines.Count) {
+        $remaining = $buffer.Lines.Count - $buffer.Visible
+        $step = if ($remaining -gt 15) { 4 } else { $Window.FindName('LogoHost').Tag.Random.Next(1,3) }
+        $buffer.Visible = [Math]::Min($buffer.Lines.Count, $buffer.Visible+$step)
+    }
+    $shown = if ($buffer.Visible) { $buffer.Lines[0..($buffer.Visible-1)] -join "`r`n" } else { '' }
+    if ($log.Text -cne $shown) {
+        $follow = $log.VerticalOffset -ge ($log.ExtentHeight - $log.ViewportHeight - 2)
+        $offset = $log.VerticalOffset
+        if ($shown.StartsWith($log.Text, [StringComparison]::Ordinal)) { $log.AppendText($shown.Substring($log.Text.Length)) }
+        else { $log.Text = $shown }
+        if ($follow) { $log.ScrollToEnd() } else { $log.ScrollToVerticalOffset($offset) }
+    }
+}
+
+function Update-MonitorView {
+    param([object]$Window, [object]$Snapshot)
+    $state = $Snapshot.State
+    $terminal = $state.Status -in $script:TerminalStates
+    $finished = $terminal -and -not $state.ActiveOperation
+    $phases = @{
+        Queued='IN CODA'; Scan='SCANSIONE'; Download='DOWNLOAD'; Install='INSTALLAZIONE'
+        Verify='VERIFICA'; Resume='RIPRESA'; Retry='ATTESA RETRY'
+        RestartCountdown='RIAVVIO IN ARRIVO'; Restart='RIAVVIO CONFERMATO'
+        Cancelling='ARRESTO IN CORSO'; OperationStillRunning='OPERAZIONE ANCORA ATTIVA'
+        Completed='COMPLETATO'; CompletedWithExclusions='COMPLETATO CON ESCLUSIONI'
+        CompletedWithErrors='COMPLETATO CON ERRORI'; Blocked='BLOCCATO'; Stopped='ARRESTATO'
+    }
+    $phase = [string]$state.Phase
+    if ($terminal) { $phase = [string]$state.Status }
+    $heading = if ($phases.ContainsKey($phase)) { $phases[$phase] } else { $phase }
+    $color = 'Accent'
+    $status = 'ATTIVO'
+    switch ($state.Status) {
+        'Completed' { $color='Success'; $status='COMPLETATO' }
+        'CompletedWithExclusions' { $color='Warning'; $status='CON ESCLUSIONI' }
+        'CompletedWithErrors' { $color='Error'; $status='CON ERRORI' }
+        'Blocked' { $color='Error'; $status='BLOCCATO' }
+        'Stopped' { $color='Muted'; $status='ARRESTATO' }
+        'WaitingForReboot' { $color='Warning'; $status='RIAVVIO' }
+    }
+    if ($state.Phase -eq 'Retry' -and -not $terminal) { $color='Warning'; $status='IN ATTESA' }
+    $brush = $Window.Resources[$color]
+    $Window.FindName('PhaseText').Text = $heading
+    $Window.FindName('PhaseText').Foreground = $brush
+    $Window.FindName('StatusText').Text = $status
+    $Window.FindName('StatusText').Foreground = $brush
+    $Window.FindName('LogoHost').Tag.Active = -not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')
+    $Window.FindName('RunText').Text = 'session/' + ([string]$state.RunId).Substring(0,8)
+    $Window.FindName('DetailText').Text = [string]$state.Message
+    $upgradeLabels = @{ NotRequested='non richiesto'; Requested='richiesto'; Offered='offerto'; Completed='completato'; NotOffered='non offerto'; NotCompleted='non completato' }
+    $upgrade = [string]$state.Windows11UpgradeStatus
+    if ($upgradeLabels.ContainsKey($upgrade)) { $upgrade = $upgradeLabels[$upgrade] }
+    $Window.FindName('PhaseDetail').Text = "scan: $($state.Scans) // Win11: $upgrade"
+    $failures = @($state.Failures | Where-Object { -not $_.Resolved }).Count
+    $Window.FindName('InstalledCount').Text = [string]@($state.Installed).Count
+    $Window.FindName('FailureCount').Text = [string]$failures
+    $Window.FindName('FailureCount').Foreground = $Window.Resources[$(if ($failures) { 'Error' } else { 'Ink' })]
+    $Window.FindName('SkippedCount').Text = [string]@($state.Skipped).Count
+    $Window.FindName('RebootCount').Text = [string]$state.Reboots
+    $bar = $Window.FindName('Progress')
+    $bar.Foreground = $brush
+    $bar.Value = 0
+    $Window.FindName('ProgressText').Text = '--'
+    $Window.FindName('ProgressText').Foreground = $brush
+    $Window.FindName('ProgressCaption').Text = 'NON DISPONIBILE'
+    $Window.FindName('Activity').Visibility = 'Collapsed'
+    # A percentage belongs to the current WUA operation, never to the whole maintenance run.
+    if (-not $terminal -and $state.Phase -in @('Download','Install') -and
+        $null -ne $state.ProgressPercent -and $state.ProgressPercent -ge 0 -and $state.ProgressPercent -le 100) {
+        $bar.Value = $state.ProgressPercent
+        $Window.FindName('ProgressText').Text = "$($state.ProgressPercent)%"
+        $Window.FindName('ProgressCaption').Text = 'IN QUESTA FASE'
+    } elseif (-not $terminal -and $state.Phase -in @('Scan','Download','Install','Verify','Cancelling')) {
+        if ([Windows.SystemParameters]::ClientAreaAnimation) { $Window.FindName('Activity').Visibility = 'Visible' }
+    }
+    if ($state.Phase -eq 'RestartCountdown' -and -not $terminal) {
+        # Display the worker's last reported countdown; do not extrapolate a restart from wall-clock time.
+        if ($state.Message -match '^Restart in (\d+) seconds\.') {
+            $Window.FindName('ProgressText').Text = $Matches[1] + 's'
+            $Window.FindName('ProgressCaption').Text = 'ULTIMO SEGNALE'
+        }
+    }
+    $notice = 'Chiudere il monitor non arresta il worker.'
+    if ($Snapshot.StopRequested) { $notice = 'Stop richiesto. In attesa dell''operazione corrente.' }
+    if ($state.RebootCommitted) { $notice = 'Riavvio confermato. Non annullabile dal monitor.' }
+    if ($terminal -and $state.ActiveOperation) { $notice = 'WUA potrebbe essere ancora attiva. Verificare il log.' }
+    if ($finished -and -not $state.RebootCommitted) { $notice = 'Esito conservato fino alla chiusura.' }
+    if ($state.CleanupError) { $notice = 'Pulizia incompleta: ' + $state.CleanupError }
+    $updated = [DateTime]::Parse([string]$state.UpdatedUtc).ToLocalTime().ToString('HH:mm:ss')
+    $Window.FindName('NoticeText').Text = "$notice  ultimo segnale: $updated"
+    $Window.FindName('NoticeText').Foreground = $Window.Resources[$(if ($state.CleanupError) { 'Error' } else { 'Muted' })]
+    $Window.FindName('StopButton').IsEnabled = -not $terminal -and -not $state.RebootCommitted -and -not $Snapshot.StopRequested
+    $urgent = $terminal -or $Snapshot.StopRequested -or $state.RebootCommitted -or $state.Phase -eq 'RestartCountdown' -or $failures -gt 0 -or $state.CleanupError -or $Snapshot.Log -match '\[(ERROR|WARN|WARNING)\]'
+    Update-MonitorLog $Window -Text $Snapshot.Log -AcceptSnapshot -Immediate:$urgent
+}
+
+function Get-MonitorSnapshot {
+    param([string]$RunId, [bool]$RequestStop, [bool]$AcknowledgeFinal)
+    $script:MonitorRunId = $RunId
+    if ($RequestStop) { Invoke-Stop | Out-Null }
+    $control = Enter-RunLock $script:ControlLockName
+    try {
+        $state = Get-State
+        if ($null -eq $state -or $state.RunId -ne $RunId) {
+            return [pscustomobject]@{ State=$null; Cleaned=($null -eq $state -and -not (Test-Path -LiteralPath $script:Root)) }
+        }
+        Initialize-RuntimeState $state
+        $finished = $state.Status -in $script:TerminalStates -and -not $state.ActiveOperation
+        $text = @(Get-Content -LiteralPath $script:LogPath -Encoding UTF8 -Tail 60 -ErrorAction Stop) -join "`r`n"
+        if ($finished) {
+            $text += "`r`n`r`nESCLUSIONI:`r`n" + (($state.Skipped | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
+            $text += "`r`n`r`nERRORI APERTI:`r`n" + (($state.Failures | Where-Object { -not $_.Resolved } | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
+        }
+        Send-CompletionSound $state
+        if ($finished -and $AcknowledgeFinal) { [IO.File]::WriteAllText($script:ResultReadPath, $RunId) }
+        return [pscustomobject]@{ State=$state; Log=$text; StopRequested=(Test-Path -LiteralPath $script:StopPath); Finished=$finished }
+    } finally { Exit-RunLock $control }
+}
+
+function New-MonitorReader {
+    # Only monitor I/O and the existing cooperative stop run here; no update worker is loaded.
+    $session = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($name in @('Assert-Administrator','Enter-RunLock','Exit-RunLock','Read-JsonState','Get-State',
+        'Initialize-Windows11UpgradeState','Initialize-RuntimeState','Invoke-Stop',
+        'Play-CompletionSound','Send-CompletionSound','Get-MonitorSnapshot')) {
+        $session.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, (Get-Item "Function:$name").Definition))
+    }
+    foreach ($name in @('Root','StatePath','BackupPath','StopPath','LogPath','ControlLockName',
+        'NotificationPath','ResultReadPath','TerminalStates','TaskName')) {
+        $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($name, (Get-Variable -Name $name -Scope Script -ValueOnly), ''))
+    }
+    $session.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new('ErrorActionPreference', 'Stop', ''))
+    $reader = [PowerShell]::Create($session)
+    return $reader
 }
 
 function Invoke-Monitor {
@@ -990,112 +2261,99 @@ function Invoke-Monitor {
     if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
         throw 'Monitor requires an interactive desktop. Use -Action Status in unattended sessions.'
     }
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-    [Windows.Forms.Application]::EnableVisualStyles()
+    $window = New-MonitorWindow
     $initial = Get-State
-    if ($null -eq $initial) { throw 'No update run found.' }
+    if ($null -eq $initial) { $window.Close(); return }
     $runId = $initial.RunId
-    if ($MonitorRunId -and $MonitorRunId -ne $runId) { return }
+    if ($MonitorRunId -and $MonitorRunId -ne $runId) { $window.Close(); return }
     $script:MonitorRunId = $runId
     $mutex = [Threading.Mutex]::new($false, ('Local\MSP-WindowsUpdate-Monitor-' + $runId))
     $owned = $false
+    $reader = $null
+    $timer = $null
     try {
         try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
         if (-not $owned) { return }
-        $form = [Windows.Forms.Form]::new()
-        $form.Text = 'DaScript - Windows Update'
-        $form.ClientSize = [Drawing.Size]::new(850, 570)
-        $form.MinimumSize = [Drawing.Size]::new(700, 500)
-        $form.StartPosition = 'CenterScreen'
-        $form.Font = [Drawing.Font]::new('Segoe UI', 10)
-        $heading = [Windows.Forms.Label]::new()
-        $heading.SetBounds(20, 15, 810, 40)
-        $heading.Font = [Drawing.Font]::new('Segoe UI', 16, [Drawing.FontStyle]::Bold)
-        $heading.Anchor = 'Top, Left, Right'
-        $detail = [Windows.Forms.Label]::new()
-        $detail.SetBounds(20, 60, 810, 110)
-        $detail.Anchor = 'Top, Left, Right'
-        $bar = [Windows.Forms.ProgressBar]::new()
-        $bar.SetBounds(20, 175, 810, 20)
-        $bar.Anchor = 'Top, Left, Right'
-        $log = [Windows.Forms.TextBox]::new()
-        $log.SetBounds(20, 210, 810, 295)
-        $log.Multiline = $true
-        $log.ReadOnly = $true
-        $log.ScrollBars = 'Both'
-        $log.WordWrap = $false
-        $log.Anchor = 'Top, Bottom, Left, Right'
-        $stop = [Windows.Forms.Button]::new()
-        $stop.Text = 'Arresta'
-        $stop.SetBounds(20, 520, 130, 32)
-        $stop.Anchor = 'Bottom, Left'
-        $close = [Windows.Forms.Button]::new()
-        $close.Text = 'Chiudi finestra'
-        $close.SetBounds(670, 520, 160, 32)
-        $close.Anchor = 'Bottom, Right'
-        $form.Controls.AddRange(@($heading, $detail, $bar, $log, $stop, $close))
-        $timer = [Windows.Forms.Timer]::new()
-        $timer.Interval = 3000
+        $view = [pscustomobject]@{ FinalRead=$false; Pending=$null; NextRead=[DateTime]::MinValue; RequestStop=$false; Stopping=$false }
+        $reader = New-MonitorReader
+        $timer = [Windows.Threading.DispatcherTimer]::new()
+        $timer.Interval = [TimeSpan]::FromMilliseconds(120)
         $refresh = {
-        try {
-            $state = Get-State
-            if ($null -eq $state -or $state.RunId -ne $runId) { $form.Close(); return }
-            Initialize-RuntimeState $state
-            $finished = $state.Status -in $script:TerminalStates -and -not $state.ActiveOperation
-            $heading.ForeColor = [Drawing.Color]::DarkBlue
-            switch ($state.Status) {
-                'Completed' { $heading.Text = 'Aggiornamenti completati'; $heading.ForeColor = [Drawing.Color]::DarkGreen }
-                'CompletedWithErrors' { $heading.Text = 'Operazione conclusa con problemi'; $heading.ForeColor = [Drawing.Color]::DarkOrange }
-                'Blocked' { $heading.Text = 'Operazione bloccata - intervento necessario'; $heading.ForeColor = [Drawing.Color]::Firebrick }
-                'Stopped' { $heading.Text = 'Arrestato su richiesta' }
-                'WaitingForReboot' { $heading.Text = 'Riavvio per proseguire gli aggiornamenti' }
-                default { $heading.Text = 'Aggiornamenti in corso' }
+            try {
+                Update-MonitorAnimation $window
+                if ($null -ne $view.Pending) {
+                    if (-not $view.Pending.IsCompleted) { return }
+                    try {
+                        $result = @($reader.EndInvoke($view.Pending))
+                        if ($reader.HadErrors) { throw ($reader.Streams.Error | Out-String) }
+                    } finally { $view.Pending = $null; $view.Stopping = $false }
+                    $snapshot = $result[-1]
+                    if ($null -eq $snapshot.State) {
+                        if ($view.FinalRead) {
+                            $window.FindName('NoticeText').Text = $(if ($snapshot.Cleaned) {
+                                'Pulizia completata. Esito conservato in questa finestra.'
+                            } else { 'La sessione precedente non e'' piu disponibile.' })
+                            $timer.Stop()
+                        } else { $window.Close() }
+                        return
+                    }
+                    Update-MonitorView $window $snapshot
+                    $view.FinalRead = $snapshot.Finished
+                    $view.NextRead = [DateTime]::UtcNow.AddSeconds(3)
+                }
+                if ($view.RequestStop -or [DateTime]::UtcNow -ge $view.NextRead) {
+                    $reader.Commands.Clear()
+                    $reader.Streams.ClearStreams()
+                    [void]$reader.AddCommand('Get-MonitorSnapshot').AddParameter('RunId', $runId).AddParameter('RequestStop', $view.RequestStop).AddParameter('AcknowledgeFinal', $view.FinalRead)
+                    $view.Stopping = $view.RequestStop
+                    $view.Pending = $reader.BeginInvoke()
+                    $view.RequestStop = $false
+                }
+                if ($view.Stopping -or $view.RequestStop) { $window.FindName('StopButton').IsEnabled = $false }
+            } catch {
+                $window.FindName('PhaseText').Text = 'LETTURA / COMANDO FALLITI'
+                $window.FindName('PhaseText').Foreground = $window.Resources['Error']
+                $window.FindName('StatusText').Text = 'ERRORE MONITOR'
+                $window.FindName('StatusText').Foreground = $window.Resources['Error']
+                $window.FindName('NoticeText').Text = $_.Exception.Message
+                $window.FindName('StopButton').IsEnabled = $false
+                $window.FindName('Activity').Visibility = 'Collapsed'
+                $window.FindName('LogoHost').Tag.Active = $false
+                Update-MonitorLog $window -Immediate
+                $window.FindName('Progress').Value = 0
+                $window.FindName('ProgressText').Text = '--'
+                $window.FindName('ProgressCaption').Text = 'STATO NON LETTO'
+                $view.NextRead = [DateTime]::UtcNow.AddSeconds(3)
             }
-            $failures = @($state.Failures | Where-Object { -not $_.Resolved }).Count
-            $detail.Text = "$($state.Message)`r`nInstallati: $(@($state.Installed).Count)   Errori: $failures   Esclusi: $(@($state.Skipped).Count)   Riavvii: $($state.Reboots)`r`nWindows 11: $($state.Windows11UpgradeStatus)   Fase: $($state.Phase)`r`nChiudere questa finestra non interrompe il lavoro. Log: $script:LogPath"
-            if ($finished -or $state.Status -eq 'Blocked' -or $state.ProgressPercent -ge 0) {
-                $bar.Style = 'Continuous'
-                $bar.Value = $(if ($state.Status -eq 'Completed') { 100 } else { [Math]::Max(0, [Math]::Min(100, $state.ProgressPercent)) })
-            } else { $bar.Style = 'Marquee' }
-            $stop.Enabled = -not ($state.Status -in $script:TerminalStates) -and -not $state.RebootCommitted -and -not (Test-Path -LiteralPath $script:StopPath)
-            $text = @(Get-Content -LiteralPath $script:LogPath -Tail 60 -ErrorAction Stop) -join "`r`n"
-            if ($finished) {
-                $text += "`r`n`r`nESCLUSIONI:`r`n" + (($state.Skipped | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
-                $text += "`r`n`r`nERRORI APERTI:`r`n" + (($state.Failures | Where-Object { -not $_.Resolved } | ForEach-Object { "$($_.Title): $($_.Reason)" }) -join "`r`n")
-            }
-            if ($log.Text -ne $text) { $log.Text = $text; $log.SelectionStart = $log.TextLength; $log.ScrollToCaret() }
-            Send-CompletionSound $state
-        } catch { $heading.Text = 'Impossibile leggere lo stato'; $detail.Text = $_.Exception.Message }
         }
         $timer.add_Tick($refresh)
-        $form.add_Shown({ & $refresh; $timer.Start() })
-        $stop.add_Click({
-            try {
-                $current = Get-State
-                if ($current.RunId -ne $runId) { $form.Close(); return }
-                Invoke-Stop
-                & $refresh
-            } catch { [void][Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Arresto') }
+        $window.add_ContentRendered({ $timer.Start(); & $refresh })
+        $window.FindName('StopButton').add_Click({
+            $view.RequestStop = $true
+            $window.FindName('StopButton').IsEnabled = $false
+            $window.FindName('NoticeText').Text = 'Invio richiesta di stop...'
+            & $refresh
         })
-        $close.add_Click({ $form.Close() })
-        $form.add_FormClosed({
-            $timer.Stop()
-            # Keep the logon task until the terminal result has been acknowledged.
-            $control = $null
-            try {
-                $control = Enter-FileLock $script:ControlLockPath
-                $current = Get-State
-                Initialize-RuntimeState $current
-                if ($current.RunId -eq $runId -and $current.Status -in $script:TerminalStates -and -not $current.ActiveOperation) {
-                    Remove-TaskSafely $script:MonitorTaskName
-                }
-            } catch { Write-Warning $_.Exception.Message }
-            finally { if ($null -ne $control) { $control.Dispose() } }
-        })
-        try { [void]$form.ShowDialog() }
-        finally { $timer.Dispose(); $form.Dispose() }
+        $window.FindName('CloseButton').add_Click({ $window.Close() })
+        $window.add_Closed({ $timer.Stop() })
+        [void]$window.ShowDialog()
     } finally {
+        if ($null -ne $timer) { $timer.Stop() }
+        $window.Close()
+        if ($null -ne $reader) {
+            try {
+                # Closing the view must not discard a cooperative stop already queued by its button.
+                if ($null -ne $view.Pending) { $null = $reader.EndInvoke($view.Pending) }
+                if ($view.RequestStop) {
+                    $reader.Commands.Clear()
+                    $reader.Streams.ClearStreams()
+                    [void]$reader.AddCommand('Get-MonitorSnapshot').AddParameter('RunId', $runId).AddParameter('RequestStop', $true)
+                    $null = $reader.Invoke()
+                }
+                if ($reader.HadErrors) { Write-Warning ($reader.Streams.Error | Out-String) }
+            } catch { Write-Warning ('Monitor closing: ' + $_.Exception.Message) }
+            finally { $reader.Dispose() }
+        }
         if ($owned) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
