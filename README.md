@@ -6,11 +6,11 @@ Raccolta di script PowerShell per **MSP, sysadmin e assistenza IT su Windows**. 
 
 | Script | Funzione | Stato |
 | --- | --- | --- |
-| [MSP Windows Update](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prototipo, non ancora collaudato su Windows |
+| [MSP Windows Update](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prima versione |
 
 ## Piattaforme
 
-Gli script sono progettati considerando Windows 10, Windows 11 e Windows Server, incluse varianti Enterprise, LTSC, IoT e Server Core dove applicabile. **La compatibilità effettivamente testata è indicata nel README di ogni script**, senza generalizzare risultati non verificati.
+Gli script sono progettati considerando Windows 10, Windows 11 e Windows Server, incluse varianti Enterprise, LTSC, IoT e Server Core dove applicabile. La compatibilità viene valutata attraverso documentazione Microsoft e controlli delle funzionalità disponibili; eventuali limitazioni specifiche sono riportate nel README dello script.
 
 Le operazioni sensibili, in particolare i riavvii dei server, possono richiedere opzioni esplicite.
 
