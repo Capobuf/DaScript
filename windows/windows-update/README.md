@@ -37,7 +37,7 @@ Script PowerShell per la manutenzione unattended di Windows. Usa le API native W
 - **Windows 10 / 11**: comprese, come obiettivo progettuale, Pro, Enterprise, Education, LTSC e IoT Enterprise.
 - **Windows Server 2019 e successivi con Desktop Experience**: incluse edizioni Standard/Datacenter. **Server Core è escluso** e viene rifiutato prima di iniziare gli aggiornamenti.
 - **Requisito:** Windows PowerShell **5.1**, diritti amministrativi, Windows Update Agent funzionante, attività pianificate e accesso alla sorgente aggiornamenti configurata (Windows Update, Microsoft Update se già abilitato, oppure WSUS). Il worker usa un piccolo callback COM compilato con `Add-Type`: policy che vietano la compilazione/esecuzione devono essere gestite dall'amministratore, non vengono aggirate.
-- La ripresa verifica l'ultimo evento **12 di Microsoft-Windows-Kernel-General** nel registro **System**, letto con `Get-WinEvent`. Se l'evento manca o non è accessibile, lo script non presume un riavvio: l'avvio fallisce o la ripresa viene bloccata. Non cancellare il registro durante un'esecuzione. Uno stato di una vecchia versione con un'operazione incerta e senza questo identificativo richiede verifica dell'operatore; non sostituire il worker durante un'esecuzione attiva.
+- La ripresa confronta **`Win32_OperatingSystem.LastBootUpTime`**, letto con `Get-CimInstance` e normalizzato in UTC. Non richiede che l'evento di avvio sia ancora presente nel registro System. Se CIM non è accessibile o il valore manca/non è valido, l'avvio fallisce o la ripresa viene bloccata. Uno stato precedente basato su `event12` con un'operazione incerta o un riavvio pendente richiede verifica dell'operatore: il cambio di formato non viene interpretato come un riavvio. Non sostituire il worker durante un'esecuzione attiva.
 - Sulle edizioni IoT/Enterprise con **Unified Write Filter (UWF) attivo**, lo script **rifiuta l'avvio**: gli aggiornamenti rischiano di andare persi al riavvio. Usare la modalità di manutenzione UWF prevista da Windows.
 
 Il riconoscimento di client/server usa i dati del sistema operativo, non stringhe localizzate o liste di nomi delle edizioni.
@@ -140,7 +140,7 @@ Un'operazione WUA ancora attiva/incerta o un riavvio già confermato impediscono
 - Limiti predefiniti: **8 riavvii**, **3 tentativi per aggiornamento**, **3 errori generali consecutivi**, **30 passaggi per worker** e **7 giorni** per esecuzione. Retry periodico ogni **15 minuti**; riavvio richiesto con **90 secondi** di preavviso.
 - `-RebootDelaySeconds` configura il countdown (predefinito **90 secondi**). Se il riavvio confermato non avviene entro 15 minuti, un successivo controllo registra `Blocked`.
 - Ricerca, download e installazione sono asincroni, con heartbeat e progresso. `-OperationTimeoutMinutes` imposta il limite **per operazione** (predefinito **180 minuti**). Alla scadenza si richiede l'annullamento cooperativo WUA. Dopo altri 5 minuti senza conclusione, l'esito diventa `Blocked` e il task worker viene rimosso; il processo resta in attesa dell'operazione nativa, senza uccidere servizi/installazioni, avviare altro lavoro o riavviare automaticamente. Il monitor mostra che l'operazione potrebbe essere ancora attiva.
-- Mutex con accesso limitato a SYSTEM e amministratori impediscono worker, avvii e pulizia concorrenti. Se il processo termina lasciando un'operazione WUA di esito sconosciuto, viene impedito un nuovo avvio nello stesso boot; occorre verificare/ripristinare il sistema. Dopo un nuovo boot confermato dall'evento Windows, la ripresa registra operazione, PID, ora iniziale e identificativi dei due avvii, salva subito l'avvenuto recupero e ricontrolla gli aggiornamenti. Un normale riavvio richiesto dopo la conclusione dell'installazione non produce questo warning. Non si forza un riavvio per risolvere il blocco.
+- Mutex con accesso limitato a SYSTEM e amministratori impediscono worker, avvii e pulizia concorrenti. Se il processo termina lasciando un'operazione WUA di esito sconosciuto, viene impedito un nuovo avvio nello stesso boot; occorre verificare/ripristinare il sistema. Dopo un nuovo boot rilevato tramite `LastBootUpTime`, la ripresa registra operazione, PID, ora iniziale e identificativi dei due avvii, salva subito l'avvenuto recupero e ricontrolla gli aggiornamenti. Un normale riavvio richiesto dopo la conclusione dell'installazione non produce questo warning. Non si forza un riavvio per risolvere il blocco.
 - `Completed` significa solo che WUA non segnala ulteriori **aggiornamenti eleggibili nella sorgente configurata**. Non costituisce una verifica di sicurezza o supporto del sistema.
 
 ## Rischi e test necessari
@@ -150,6 +150,8 @@ Alla fine del countdown il riavvio usa esplicitamente `/f`: chiude forzatamente 
 Controlli rapidi di riconoscimento piattaforma, consenso, filtri e ciclo operativo su dati sintetici e file temporanei, senza avviare aggiornamenti o riavvii (arresto al primo errore):
 
 ```powershell
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootIdentity.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Boot identity checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootstrapConsent.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Bootstrap consent checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateSelection.ps1
@@ -161,6 +163,8 @@ if ($LASTEXITCODE -ne 0) { throw 'UWF checks failed' }
 powershell.exe -NoProfile -NonInteractive -STA -File .\tests\Test-Monitor.ps1
 if ($LASTEXITCODE -ne 0) { throw 'WPF checks failed' }
 ```
+
+`Test-BootIdentity.ps1` verifica letture CIM reali in sola lettura e casi sintetici con eventi assenti, stesso boot, boot successivo, errore CIM, valori mancanti/non validi e stati precedenti incompatibili. Non avvia il worker né riavvia Windows.
 
 `Test-BootstrapConsent.ps1` isola il consenso senza scaricare né avviare il worker. Usa dati CIM e risposte sintetiche per client, server e controller di dominio, consenso esplicito, risposta negativa e lettura fallita. In una console verifica le risposte; con input reindirizzato verifica il blocco prima della domanda. L'output indica quale percorso è stato verificato.
 
@@ -182,7 +186,7 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 
 ## Riferimenti
 
-- [Win32_OperatingSystem e ProductType](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-operatingsystem)
+- [Win32_OperatingSystem: ProductType e LastBootUpTime](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-operatingsystem)
 - [PowerShell: modalità NonInteractive](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1#-noninteractive)
 - [Windows Update Agent API](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/portal-client)
 - [Ricerca, download e installazione con WUA](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/searching--downloading--and-installing-updates)
@@ -194,8 +198,7 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 - [Operazioni WUA asincrone](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/guidelines-for-asynchronous-wua-operations)
 - [Firmware distribuito tramite Windows](https://learn.microsoft.com/en-us/windows-hardware/drivers/bringup/windows-uefi-firmware-update-platform)
 - [Contesti di sicurezza delle attività pianificate](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
-- [Diagnosi dei riavvii tramite eventi Windows](https://learn.microsoft.com/en-us/troubleshoot/windows-server/performance/troubleshoot-unexpected-reboots-system-event-logs)
-- [Get-WinEvent in Windows PowerShell 5.1](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/get-winevent?view=powershell-5.1)
+- [Lettura dell'ultimo avvio tramite WMI](https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-tasks--desktop-management)
 - [Mutex nativi .NET](https://learn.microsoft.com/en-us/dotnet/api/system.threading.mutex?view=netframework-4.8.1)
 - [Unregister-ScheduledTask](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/unregister-scheduledtask)
 - [WPF DispatcherTimer](https://learn.microsoft.com/en-us/dotnet/api/system.windows.threading.dispatchertimer?view=netframework-4.8)

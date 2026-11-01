@@ -356,20 +356,28 @@ function Set-Phase {
 }
 
 function Get-BootId {
-    # Compare a recorded boot event, not a freshly computed wall-clock boot time.
-    $boot = Get-WinEvent -FilterHashtable @{
-        LogName='System'; ProviderName='Microsoft-Windows-Kernel-General'; Id=12
-    } -MaxEvents 1 -ErrorAction Stop
-    if ($null -eq $boot.RecordId -or $null -eq $boot.TimeCreated) {
-        throw 'Cannot identify the Windows boot from System event 12.'
+    # Use the OS-reported boot time; event logs can roll over during a long uptime.
+    try {
+        $boot = (Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime
+    } catch {
+        throw ('Cannot read Windows boot time from CIM: ' + $_.Exception.Message)
     }
-    return ('event12:{0}:{1}' -f $boot.RecordId, $boot.TimeCreated.ToUniversalTime().Ticks)
+    if ($boot -isnot [DateTime] -or $boot -eq [DateTime]::MinValue) {
+        throw 'CIM did not return a valid LastBootUpTime. Startup or recovery cannot continue.'
+    }
+    return ('cimboot:{0}' -f $boot.ToUniversalTime().Ticks)
 }
 
 function Test-BootChanged {
     param([string]$Previous, [string]$Current)
-    if ($Previous -notmatch '^event12:\d+:\d+$' -or $Current -notmatch '^event12:\d+:\d+$') {
+    if ($Previous -notmatch '^cimboot:[1-9]\d{0,18}$' -or $Current -notmatch '^cimboot:[1-9]\d{0,18}$') {
         throw 'Boot evidence is missing or uses an older state format. Recovery requires operator verification.'
+    }
+    foreach ($value in @($Previous, $Current)) {
+        $ticks = 0L
+        if (-not [long]::TryParse($value.Substring(8), [ref]$ticks) -or $ticks -gt [DateTime]::MaxValue.Ticks) {
+            throw 'Boot evidence contains an invalid timestamp. Recovery requires operator verification.'
+        }
     }
     return ($Previous -ne $Current)
 }

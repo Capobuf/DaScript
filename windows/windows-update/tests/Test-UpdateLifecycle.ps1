@@ -26,10 +26,10 @@ function Assert-Throws {
 # Replace external side effects; keep actual state files, locks, callbacks and control flow.
 function Assert-Administrator { }
 $nativeBootId = Get-BootId
-Assert-True ($nativeBootId -match '^event12:\d+:\d+$') 'Native boot event did not provide an identity.'
+Assert-True ($nativeBootId -match '^cimboot:\d+$') 'Native CIM boot time did not provide an identity.'
 Assert-True (-not (Test-BootChanged $nativeBootId (Get-BootId))) 'Boot identity changed between read-only queries.'
 Assert-Throws { Test-BootChanged 'legacy-ticks' $nativeBootId }
-$script:testBootId = 'event12:1:100'
+$script:testBootId = 'cimboot:100'
 function Get-BootId { return $script:testBootId }
 function Invoke-SystemRestart { $script:restarts++; return $script:restartExit }
 function Remove-TaskSafely {
@@ -151,10 +151,10 @@ try {
     Assert-True ([IO.File]::Exists($script:StopPath)) 'Late stop was not persisted for the next boot.'
     Invoke-WorkerCore
     Assert-True ((Get-State).Status -eq 'WaitingForReboot') 'A still-pending committed reboot was falsely reported as stopped.'
-    $script:testBootId = 'event12:2:200'
+    $script:testBootId = 'cimboot:200'
     Invoke-WorkerCore
     Assert-True ((Get-State).Status -eq 'Stopped') 'Stop was not applied before any resumed update work.'
-    $script:testBootId = 'event12:1:100'
+    $script:testBootId = 'cimboot:100'
 
     $state = New-TestState
     $script:restartExit = 5
@@ -167,14 +167,14 @@ try {
 
     $state = New-TestState
     $state.ActiveOperation = 'Install'
-    $state.OperationBootId = 'event12:1:100'
+    $state.OperationBootId = 'cimboot:100'
     Save-State $state
     Invoke-WorkerCore
     Assert-True ((Get-State).Status -eq 'Blocked') 'Uncertain installation was allowed to resume on the same boot.'
 
     $state = New-TestState
     $state.ActiveOperation = 'Scan'
-    $state.OperationBootId = 'event12:0:50'
+    $state.OperationBootId = 'cimboot:50'
     Save-State $state
     [IO.File]::WriteAllText($script:StopPath, 'stop')
     Invoke-WorkerCore
