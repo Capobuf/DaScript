@@ -65,20 +65,18 @@ Il suono di sistema **Asterisk** viene richiesto una sola volta per esecuzione p
 
 ## Avvio da URL GitHub
 
-I comandi seguenti fissano il bootstrap alla revisione `8e1ec710f781e48a531c8af0144299c04bd91eff`, che scarica il worker `56939b92f9cac0eab59de84646a611bb2d34f8e0`. Entrambi gli URL usano **commit Git immutabili**; il bootstrap deve essere aggiornato intenzionalmente quando lo script principale cambia.
-
-**Queste revisioni pubblicate non includono le modifiche locali a ripresa, distinzione delle esclusioni, pulizia automatica e monitor WPF. Per queste modifiche usare l'avvio locale del file aggiornato.**
+I comandi seguenti caricano il bootstrap da `main`. A ogni nuovo avvio il bootstrap scarica il worker corrente dallo stesso branch, quindi le versioni pubblicate su `main` diventano disponibili senza cambiare il comando. Le esecuzioni già avviate continuano a usare la propria copia locale, anche dopo un riavvio.
 
 Client (PowerShell amministrativa):
 
 ```powershell
-irm 'https://raw.githubusercontent.com/Capobuf/DaScript/8e1ec710f781e48a531c8af0144299c04bd91eff/windows/windows-update/bootstrap.ps1' | iex
+irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1' | iex
 ```
 
 Server (con consenso ai riavvii):
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/8e1ec710f781e48a531c8af0144299c04bd91eff/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1'))) -AllowServerReboot
 ```
 
 Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza domanda iniziale e `-NoMonitor` per esecuzioni senza interfaccia. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
