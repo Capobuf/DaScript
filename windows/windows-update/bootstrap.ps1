@@ -3,6 +3,7 @@
 param(
     [switch]$AllowServerReboot,
     [switch]$NoMonitor,
+    [switch]$KeepConsole,
     [ValidateSet('Ask', 'Allow', 'Skip')]
     [string]$Windows11Upgrade = 'Ask'
 )
@@ -49,4 +50,11 @@ try {
     if (Test-Path -LiteralPath $download) {
         Remove-Item -LiteralPath $download -Force
     }
+}
+
+# Exit only after successful startup and cleanup, in an interactive console with a monitor.
+if (-not $KeepConsole -and -not $NoMonitor -and $Host.Name -eq 'ConsoleHost' -and
+    [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and
+    [Diagnostics.Process]::GetCurrentProcess().SessionId -ne 0) {
+    exit 0
 }

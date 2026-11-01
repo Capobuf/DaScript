@@ -12,6 +12,8 @@ Il comando scarica a ogni avvio l'**ultima versione pubblicata su `main`**, senz
 
 Raccolta di script PowerShell per **MSP, sysadmin e assistenza IT su Windows**. Obiettivo: automatizzare operazioni ricorrenti senza aggiungere complessità inutile.
 
+Dopo l'avvio riuscito con il comando sopra, la sessione PowerShell interattiva si chiude e resta il monitor. In caso di errore la sessione resta aperta. Il bootstrap accetta `-KeepConsole` per mantenerla aperta; con `-NoMonitor` non richiede la chiusura.
+
 ## Script
 
 | Script | Funzione | Stato |

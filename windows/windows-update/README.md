@@ -28,6 +28,14 @@ Server senza domanda iniziale (consenso esplicito ai riavvii):
 
 Per avvii unattended su Server è necessario `-AllowServerReboot`: senza consenso, una sessione non interattiva o con input reindirizzato viene bloccata. Il bootstrap accetta anche `-Windows11Upgrade Allow|Skip` per scegliere senza la domanda sull'upgrade e `-NoMonitor` per esecuzioni senza interfaccia. `-NoMonitor` non disabilita la domanda sui riavvii. Driver e facoltativi sono già inclusi; il monitor si apre per impostazione predefinita.
 
+Con il comando `irm ... | iex`, dopo che il worker ha restituito successo e il download temporaneo è stato eliminato, il bootstrap termina la sessione PowerShell interattiva con `exit 0`. Il monitor è un processo separato e gli aggiornamenti proseguono tramite il task SYSTEM. Errori di download, avvio o pulizia lasciano la sessione aperta. La chiusura automatica è limitata a `ConsoleHost`, con desktop interattivo e input non reindirizzato; non viene richiesta con `-NoMonitor` o `-KeepConsole`. In Windows Terminal termina la sessione/scheda corrente; l'eventuale permanenza della scheda dipende dalle impostazioni del terminale. L'avvio diretto del worker locale non chiude la console chiamante.
+
+Per mantenere aperta la console:
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/bootstrap.ps1'))) -KeepConsole
+```
+
 **Attenzione:** questi comandi eseguono codice scaricato da Internet con i privilegi della sessione. Verificare il contenuto del repository e del bootstrap prima di usarli su macchine di clienti.
 
 Script PowerShell per la manutenzione unattended di Windows. Usa le API native Windows Update Agent (WUA) e una attività pianificata come `SYSTEM` per cercare, scaricare e installare aggiornamenti; riavvia quando necessario e riprende automaticamente dopo il boot, fino a due scansioni consecutive senza ulteriori aggiornamenti **eleggibili**.
@@ -165,6 +173,8 @@ powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootIdentity.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Boot identity checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootstrapConsent.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Bootstrap consent checks failed' }
+powershell.exe -NoProfile -NonInteractive -File .\tests\Test-BootstrapExit.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap exit checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateSelection.ps1
 if ($LASTEXITCODE -ne 0) { throw 'Selection checks failed' }
 powershell.exe -NoProfile -NonInteractive -File .\tests\Test-UpdateInstallation.ps1
@@ -184,6 +194,8 @@ if ($LASTEXITCODE -ne 0) { throw 'WPF checks failed' }
 `Test-BootstrapConsent.ps1` isola il consenso senza scaricare né avviare il worker. Usa dati CIM e risposte sintetiche per client, server e controller di dominio, consenso esplicito, risposta negativa e lettura fallita. In una console verifica le risposte; con input reindirizzato verifica il blocco prima della domanda. L'output indica quale percorso è stato verificato.
 
 Il controllo UWF include query CIM in sola lettura: verifica gli errori reali di classe/namespace assenti e distingue `NativeErrorCode` dal valore numerico di `StatusCode`. Errori di accesso o del provider restano bloccanti.
+
+`Test-BootstrapExit.ps1` verifica l'uscita reale di processi PowerShell separati con contesto interattivo e worker sintetici: successo, `KeepConsole`, `NoMonitor`, input reindirizzato, host diverso ed errori di download, worker e pulizia. Non scarica codice né avvia aggiornamenti.
 
 `Test-MemoryLog.ps1` verifica la memoria condivisa con un processo di lettura separato, la coda limitata, Unicode, il troncamento, la conservazione finché esiste un lettore e la perdita dello storico alla chiusura dell'ultimo accesso. Controlla inoltre che non venga creato un file di log. I test usano nomi `Local\` isolati; il collegamento fra sessione SYSTEM e desktop è progettato sulle API Microsoft.
 
@@ -207,6 +219,8 @@ Casi di collaudo consigliati, su sistemi rappresentativi:
 
 - [Win32_OperatingSystem: ProductType e LastBootUpTime](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-operatingsystem)
 - [PowerShell: modalità NonInteractive](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe?view=powershell-5.1#-noninteractive)
+- [PowerShell: exit e finally](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_language_keywords?view=powershell-5.1#exit)
+- [Windows Terminal: comportamento alla chiusura del processo](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/profile-advanced#profile-termination-behavior)
 - [Windows Update Agent API](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/portal-client)
 - [Ricerca, download e installazione con WUA](https://learn.microsoft.com/en-us/windows/win32/wua_sdk/searching--downloading--and-installing-updates)
 - [Significato di CanRequestUserInput](https://learn.microsoft.com/en-us/windows/win32/api/wuapi/nf-wuapi-iinstallationbehavior-get_canrequestuserinput)
