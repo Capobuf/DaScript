@@ -7,19 +7,19 @@
     The background worker runs as SYSTEM from a protected Scheduled Task.
     Stop is cooperative: it never terminates an update installation mid-operation.
 .EXAMPLE
-    .\MSP-WindowsUpdate.ps1 -Action Start
+    .\WindowsUpdate.ps1 -Action Start
 .EXAMPLE
-    .\MSP-WindowsUpdate.ps1 -Action Start -NoMonitor
+    .\WindowsUpdate.ps1 -Action Start -NoMonitor
 .EXAMPLE
-    .\MSP-WindowsUpdate.ps1 -Action Status
+    .\WindowsUpdate.ps1 -Action Status
 .EXAMPLE
-    .\MSP-WindowsUpdate.ps1 -Action Stop
+    .\WindowsUpdate.ps1 -Action Stop
 .EXAMPLE
-    .\MSP-WindowsUpdate.ps1 -Action Start -AllowServerReboot -NoMonitor
+    .\WindowsUpdate.ps1 -Action Start -AllowServerReboot -NoMonitor
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Start', 'Worker', 'Status', 'Monitor', 'Stop')]
+    [ValidateSet('Start', 'Worker', 'Status', 'Monitor', 'Stop', 'Preview')]
     [string]$Action = 'Start',
     [ValidateRange(1, 20)]
     [int]$MaxReboots = 8,
@@ -45,20 +45,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:TaskName = 'MSP-WindowsUpdate'
-$script:MonitorTaskName = 'MSP-WindowsUpdate-Monitor'
+$script:TaskName = 'DaScript-WindowsUpdate'
+$script:MonitorTaskName = 'DaScript-WindowsUpdate-Monitor'
 $script:Root = Join-Path $env:ProgramData 'DaScript\WindowsUpdate'
-$script:WorkerPath = Join-Path $script:Root 'MSP-WindowsUpdate.ps1'
+$script:WorkerPath = Join-Path $script:Root 'WindowsUpdate.ps1'
 $script:StatePath = Join-Path $script:Root 'state.json'
 $script:BackupPath = Join-Path $script:Root 'state.json.bak'
 $script:StopPath = Join-Path $script:Root 'stop.request'
-$script:LogNamePrefix = 'Global\MSP-WindowsUpdate-Log-'
+$script:LogNamePrefix = 'Global\DaScript-WindowsUpdate-Log-'
 $script:MemoryLog = $null
 $script:MemoryLogRunId = ''
 $script:MemoryLogError = ''
 $script:MonitorBootId = ''
-$script:ControlLockName = 'Global\MSP-WindowsUpdate-Control'
-$script:WorkerLockName = 'Global\MSP-WindowsUpdate-Worker'
+$script:ControlLockName = 'Global\DaScript-WindowsUpdate-Control'
+$script:WorkerLockName = 'Global\DaScript-WindowsUpdate-Worker'
 $script:NotificationPath = Join-Path $script:Root 'completion-notified'
 $script:ResultReadPath = Join-Path $script:Root 'result-read'
 $script:TerminalStates = @('Completed', 'CompletedWithExclusions', 'CompletedWithErrors', 'Blocked', 'Stopped')
@@ -184,11 +184,11 @@ function Exit-RunLock {
 }
 
 function Initialize-WuaCallback {
-    if ('MSPWindowsUpdate.Callback' -as [type]) { return }
+    if ('DaScript.WindowsUpdate.Callback' -as [type]) { return }
     # WUA accepts an Automation callback with DISPID 0. No PowerShell runs on COM threads.
     Add-Type -TypeDefinition @'
 using System.Runtime.InteropServices;
-namespace MSPWindowsUpdate {
+namespace DaScript.WindowsUpdate {
     [ComVisible(true), ClassInterface(ClassInterfaceType.AutoDispatch)]
     public sealed class Callback {
         [DispId(0)] public void Invoke(object job, object args) { }
@@ -307,7 +307,7 @@ function Wait-WuaJob {
 function Invoke-WuaOperation {
     param([object]$State, [object]$Agent, [ValidateSet('Scan','Download','Install')][string]$Operation, [object]$Updates)
     Initialize-WuaCallback
-    $callback = New-Object MSPWindowsUpdate.Callback
+    $callback = New-Object DaScript.WindowsUpdate.Callback
     $State.ActiveOperation = $Operation
     $State.OperationBootId = Get-BootId
     $State.OperationStartedUtc = [DateTime]::UtcNow.ToString('o')
@@ -690,7 +690,7 @@ function Remove-RunArtifacts {
                 throw 'Cleanup refused a redirected runtime directory.'
             }
         }
-        $names = @('MSP-WindowsUpdate.ps1', 'state.json', 'state.json.bak', 'activity.log',
+        $names = @('WindowsUpdate.ps1', 'state.json', 'state.json.bak', 'activity.log',
             'stop.request', 'completion-notified', 'result-read', 'control.lock', 'worker.lock')
         $files = @(Get-ChildItem -LiteralPath $root -Force)
         foreach ($file in $files) {
@@ -1025,7 +1025,7 @@ function Invoke-WorkerCore {
             $state.Scans = [int]$state.Scans + 1
             Set-Phase $state 'Scan' ("Scanning for updates (scan $($state.Scans)).")
             $session = New-Object -ComObject 'Microsoft.Update.Session'
-            $session.ClientApplicationID = 'MSP-WindowsUpdate/1.0'
+            $session.ClientApplicationID = 'DaScript/WindowsUpdate'
             $searcher = $session.CreateUpdateSearcher()
             $searcher.Online = $true
             # Default service selection respects Windows Update / Microsoft Update / WSUS policy.
@@ -1112,6 +1112,26 @@ function Initialize-Directory {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to secure the state and script directory.' }
 }
 
+function Assert-NoPreviousUpdateRuntime {
+    # Identify older scheduled workers by their runtime path, without retaining old branding.
+    foreach ($task in @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop)) {
+        if ($task.TaskName -in @($script:TaskName, $script:MonitorTaskName)) { continue }
+        foreach ($taskAction in @($task.Actions)) {
+            if ($null -eq $taskAction -or $null -eq $taskAction.PSObject.Properties['Arguments']) { continue }
+            if ($taskAction.Arguments -match '(?i)\\WindowsUpdate\\[^"\r\n]+\.ps1"?\s+-Action\s+(Worker|Monitor)\b') {
+                throw "Previous update task found: $($task.TaskName). Finish or stop that run with its original worker before starting this version."
+            }
+        }
+    }
+    if (Test-Path -LiteralPath $script:Root) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:Root -Filter '*.ps1' -File)) {
+            if ($file.Name -ne [IO.Path]::GetFileName($script:WorkerPath)) {
+                throw "Previous worker found: $($file.FullName). Resolve the previous runtime before starting this version."
+            }
+        }
+    }
+}
+
 function Invoke-Start {
     Assert-Administrator
     $platform = Get-SupportedPlatform
@@ -1136,13 +1156,7 @@ function Invoke-Start {
     $control = $null
     $state = $null
     try {
-        # Keep the existing mutex/task names so older workers cannot run alongside this version.
-        $legacyRoot = Join-Path $env:ProgramData 'MSPTools\WindowsUpdate'
-        foreach ($name in @('state.json', 'state.json.bak')) {
-            if (Test-Path -LiteralPath (Join-Path $legacyRoot $name)) {
-                throw "Previous runtime state found in $legacyRoot. Use its worker to check status and finish or stop that run before starting this version."
-            }
-        }
+        Assert-NoPreviousUpdateRuntime
         $parentCreated = -not (Test-Path -LiteralPath (Split-Path -Parent $script:Root))
         Initialize-Directory
         $previous = Get-State
@@ -2041,21 +2055,54 @@ S3VDx2emsWDb/LVs652azK1+3MNWPcPeQWtyh84pxBtgwdpysHckl9R9zdE9sVbb+gZj6H/L/wFZ
     } finally { $reader.Dispose(); $zip.Dispose(); $inputStream.Dispose() }
 }
 
+function Update-MonitorFrame {
+    param([Windows.FrameworkElement]$Surface)
+    $width = $Surface.ActualWidth
+    $height = $Surface.ActualHeight
+    if ($width -lt 24 -or $height -lt 24) { return }
+    # Chamfer the attached panels without clipping the ghost or fullscreen intro.
+    $geometry = [Windows.Media.StreamGeometry]::new()
+    $context = $geometry.Open()
+    try {
+        $context.BeginFigure([Windows.Point]::new(12, 0), $true, $true)
+        $points = [Windows.Point[]]@(
+            [Windows.Point]::new($width-12, 0)
+            [Windows.Point]::new($width, 12)
+            [Windows.Point]::new($width, $height*0.3)
+            [Windows.Point]::new($width-6, $height*0.3+6)
+            [Windows.Point]::new($width-6, $height*0.7-6)
+            [Windows.Point]::new($width, $height*0.7)
+            [Windows.Point]::new($width, $height-12)
+            [Windows.Point]::new($width-12, $height)
+            [Windows.Point]::new(12, $height)
+            [Windows.Point]::new(0, $height-12)
+            [Windows.Point]::new(0, $height*0.7)
+            [Windows.Point]::new(6, $height*0.7-6)
+            [Windows.Point]::new(6, $height*0.3+6)
+            [Windows.Point]::new(0, $height*0.3)
+            [Windows.Point]::new(0, 12)
+        )
+        $context.PolyLineTo($points, $true, $false)
+    } finally { $context.Dispose() }
+    $geometry.Freeze()
+    $Surface.Clip = $geometry
+}
+
 function New-MonitorWindow {
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
     if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-        throw 'The WPF monitor requires STA. Run powershell.exe -STA -File MSP-WindowsUpdate.ps1 -Action Monitor.'
+        throw 'The WPF monitor requires STA. Run powershell.exe -STA -File WindowsUpdate.ps1 -Action Monitor.'
     }
     [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        Title="Windows Update" Width="900" Height="540" MinWidth="640" MinHeight="480"
-        WindowStyle="None" AllowsTransparency="True" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
+        Title="Update" Width="760" SizeToContent="Height" MinWidth="640" MinHeight="480"
+        WindowStyle="None" AllowsTransparency="True" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen"
         Background="Transparent" Foreground="#E5C56C" FontFamily="Consolas" FontSize="13"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display">
   <shell:WindowChrome.WindowChrome>
-    <shell:WindowChrome CaptionHeight="23" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+    <shell:WindowChrome CaptionHeight="0" ResizeBorderThickness="0" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
   </shell:WindowChrome.WindowChrome>
   <Window.Resources>
     <RadialGradientBrush x:Key="DimBackdrop" Center="0.5,0.5" GradientOrigin="0.5,0.5" RadiusX="0.5" RadiusY="0.5">
@@ -2109,6 +2156,19 @@ function New-MonitorWindow {
         <LinearDoubleKeyFrame KeyTime="0:0:1.18" Value="0"/>
       </DoubleAnimationUsingKeyFrames>
     </Storyboard>
+    <Storyboard x:Key="TerminalAmbient">
+      <DoubleAnimation Storyboard.TargetName="TextureOffset" Storyboard.TargetProperty="Y" From="0" To="4" Duration="0:0:0.8" RepeatBehavior="Forever"/>
+      <DoubleAnimation Storyboard.TargetName="ScanOffset" Storyboard.TargetProperty="Y" From="-0.2" To="1.2" Duration="0:0:6" RepeatBehavior="Forever"/>
+      <DoubleAnimation Storyboard.TargetName="LogoPath" Storyboard.TargetProperty="Opacity" From="0.6" To="0.78" Duration="0:0:2.4" AutoReverse="True" RepeatBehavior="Forever"/>
+    </Storyboard>
+    <SolidColorBrush x:Key="SceneSurface" Color="#111827"/>
+    <RadialGradientBrush x:Key="TextShade" RadiusX="0.5" RadiusY="0.5">
+      <GradientStop Color="#F0000000" Offset="0"/>
+      <GradientStop Color="#D9000000" Offset="0.55"/>
+      <GradientStop Color="#80000000" Offset="0.78"/>
+      <GradientStop Color="#00000000" Offset="1"/>
+    </RadialGradientBrush>
+    <DropShadowEffect x:Key="LetterContrast" Color="Black" ShadowDepth="0" BlurRadius="3" Opacity="0.9"/>
     <SolidColorBrush x:Key="Ink" Color="#E5C56C"/>
     <SolidColorBrush x:Key="Muted" Color="#B0A074"/>
     <SolidColorBrush x:Key="Accent" Color="#F0CD67"/>
@@ -2124,27 +2184,31 @@ function New-MonitorWindow {
     </Style>
     <Style TargetType="Expander">
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Expander">
-        <StackPanel>
-          <ToggleButton IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
-                        HorizontalAlignment="Left" Foreground="{TemplateBinding Foreground}" Cursor="Hand" AutomationProperties.Name="Diagnostics">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+          <ToggleButton x:Name="HeaderToggle" IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                        Content="{TemplateBinding Header}" HorizontalAlignment="Center" Foreground="{TemplateBinding Foreground}" Cursor="Hand"
+                        FocusVisualStyle="{x:Null}"
+                        AutomationProperties.Name="{Binding Header, RelativeSource={RelativeSource TemplatedParent}}">
             <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
-              <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="Transparent" Padding="0,2">
-                <StackPanel Orientation="Horizontal"><TextBlock x:Name="Mark" Text="[+] "/><TextBlock Text="DIAGNOSTICS"/></StackPanel>
+              <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="Transparent" Background="Transparent" Padding="12,5">
+                <StackPanel Orientation="Horizontal"><TextBlock x:Name="Mark" Text="[+] "/><ContentPresenter/></StackPanel>
               </Border>
               <ControlTemplate.Triggers>
                 <Trigger Property="IsChecked" Value="True"><Setter TargetName="Mark" Property="Text" Value="[-] "/></Trigger>
-                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="FocusFrame" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Foreground" Value="{StaticResource Accent}"/></Trigger>
               </ControlTemplate.Triggers>
             </ControlTemplate></ToggleButton.Template>
           </ToggleButton>
-          <ContentPresenter x:Name="Details" Visibility="Collapsed"/>
-        </StackPanel>
+          <ContentPresenter x:Name="Details" Grid.Row="1" Visibility="Collapsed"/>
+        </Grid>
         <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="Details" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
       </ControlTemplate></Setter.Value></Setter>
     </Style>
     <Style TargetType="Button">
       <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Ink}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Rule}"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Setter Property="Padding" Value="3,2"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
@@ -2154,20 +2218,47 @@ function New-MonitorWindow {
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
             </Border>
             <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="#273247"/><Setter Property="Foreground" Value="#F0F5FF"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="#FFF0B6"/><Setter TargetName="Frame" Property="BorderThickness" Value="2"/></Trigger>
-              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="#43516B"/><Setter Property="Foreground" Value="#090B09"/></Trigger>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Opacity" Value="0.88"/><Setter Property="Foreground" Value="#EED483"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="Opacity" Value="0.7"/><Setter Property="Foreground" Value="#FFF0B6"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter Property="Opacity" Value="0.7"/></Trigger>
               <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/><Setter Property="Cursor" Value="Arrow"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
-    <Style x:Key="ChromeButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Width" Value="32"/><Setter Property="Padding" Value="0"/>
-      <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
-      <Setter Property="BorderThickness" Value="0"/><Setter Property="Focusable" Value="False"/>
-      <Setter Property="shell:WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+    <SolidColorBrush x:Key="IconInk" Color="#FFF1BC"/>
+    <Geometry x:Key="InstalledIcon">F1 M10,1 H12 V2 H10 Z M9,2 H12 V3 H9 Z M8,3 H11 V4 H8 Z M0,4 H2 V5 H0 Z M7,4 H10 V5 H7 Z M0,5 H3 V6 H0 Z M6,5 H9 V6 H6 Z M1,6 H4 V7 H1 Z M5,6 H8 V7 H5 Z M2,7 H7 V8 H2 Z M3,8 H6 V9 H3 Z M4,9 H5 V10 H4 Z</Geometry>
+    <Geometry x:Key="FailureIcon">F1 M5,0 H7 V1 H5 Z M4,1 H8 V2 H4 Z M3,2 H5 V3 H3 Z M7,2 H9 V3 H7 Z M3,3 H5 V4 H3 Z M7,3 H9 V4 H7 Z M2,4 H4 V5 H2 Z M8,4 H10 V5 H8 Z M2,5 H4 V6 H2 Z M5,5 H7 V6 H5 Z M8,5 H10 V6 H8 Z M1,6 H3 V7 H1 Z M5,6 H7 V7 H5 Z M9,6 H11 V7 H9 Z M1,7 H3 V8 H1 Z M5,7 H7 V8 H5 Z M9,7 H11 V8 H9 Z M0,8 H2 V9 H0 Z M10,8 H12 V9 H10 Z M0,9 H2 V10 H0 Z M5,9 H7 V10 H5 Z M10,9 H12 V10 H10 Z M0,10 H12 V11 H0 Z M0,11 H12 V12 H0 Z</Geometry>
+    <Geometry x:Key="SkippedIcon">F1 M3,0 H9 V1 H3 Z M2,1 H10 V2 H2 Z M1,2 H3 V3 H1 Z M8,2 H11 V3 H8 Z M0,3 H2 V4 H0 Z M7,3 H12 V4 H7 Z M0,4 H2 V5 H0 Z M6,4 H9 V5 H6 Z M10,4 H12 V5 H10 Z M0,5 H2 V6 H0 Z M5,5 H8 V6 H5 Z M10,5 H12 V6 H10 Z M0,6 H2 V7 H0 Z M4,6 H7 V7 H4 Z M10,6 H12 V7 H10 Z M0,7 H2 V8 H0 Z M3,7 H6 V8 H3 Z M10,7 H12 V8 H10 Z M0,8 H5 V9 H0 Z M10,8 H12 V9 H10 Z M1,9 H4 V10 H1 Z M9,9 H11 V10 H9 Z M2,10 H10 V11 H2 Z M3,11 H9 V12 H3 Z</Geometry>
+    <Geometry x:Key="RebootIcon">F1 M3,0 H8 V1 H3 Z M2,1 H9 V2 H2 Z M1,2 H3 V3 H1 Z M7,2 H9 V3 H7 Z M0,3 H2 V4 H0 Z M8,3 H10 V4 H8 Z M0,4 H2 V5 H0 Z M8,4 H10 V5 H8 Z M0,5 H2 V6 H0 Z M6,5 H12 V6 H6 Z M0,6 H2 V7 H0 Z M7,6 H11 V7 H7 Z M0,7 H2 V8 H0 Z M8,7 H10 V8 H8 Z M0,8 H2 V9 H0 Z M1,9 H3 V10 H1 Z M10,9 H12 V10 H10 Z M2,10 H11 V11 H2 Z M3,11 H10 V12 H3 Z</Geometry>
+    <Geometry x:Key="MinimizeIcon">F1 M1,8 H11 V9 H1 Z M1,9 H11 V10 H1 Z</Geometry>
+    <Geometry x:Key="StopIcon">F1 M2,2 H10 V3 H2 Z M2,3 H10 V4 H2 Z M2,4 H10 V5 H2 Z M2,5 H10 V6 H2 Z M2,6 H10 V7 H2 Z M2,7 H10 V8 H2 Z M2,8 H10 V9 H2 Z M2,9 H10 V10 H2 Z</Geometry>
+    <Geometry x:Key="LogIcon">F1 M1,1 H11 V2 H1 Z M1,2 H11 V3 H1 Z M1,5 H11 V6 H1 Z M1,6 H11 V7 H1 Z M1,9 H11 V10 H1 Z M1,10 H11 V11 H1 Z</Geometry>
+    <Geometry x:Key="CloseIcon">F1 M0,0 H2 V1 H0 Z M10,0 H12 V1 H10 Z M0,1 H3 V2 H0 Z M9,1 H12 V2 H9 Z M1,2 H4 V3 H1 Z M8,2 H11 V3 H8 Z M2,3 H5 V4 H2 Z M7,3 H10 V4 H7 Z M3,4 H9 V5 H3 Z M4,5 H8 V6 H4 Z M4,6 H8 V7 H4 Z M3,7 H9 V8 H3 Z M2,8 H5 V9 H2 Z M7,8 H10 V9 H7 Z M1,9 H4 V10 H1 Z M8,9 H11 V10 H8 Z M0,10 H3 V11 H0 Z M9,10 H12 V11 H9 Z M0,11 H2 V12 H0 Z M10,11 H12 V12 H10 Z</Geometry>
+    <Style x:Key="PixelIcon" TargetType="ContentControl">
+      <Setter Property="Width" Value="34"/><Setter Property="Height" Value="34"/>
+      <Setter Property="Foreground" Value="{StaticResource IconInk}"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ContentControl">
+        <Viewbox Stretch="Uniform"><Grid Width="12" Height="12">
+          <Path Data="{TemplateBinding Content}" Fill="#090C14" Stroke="#090C14" StrokeThickness="1.2" StrokeLineJoin="Miter"/>
+          <Path Data="{TemplateBinding Content}" Fill="{TemplateBinding Foreground}"/>
+        </Grid></Viewbox>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="IconButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Width" Value="32"/><Setter Property="Height" Value="28"/>
+      <Setter Property="Foreground" Value="{StaticResource IconInk}"/>
+      <Setter Property="AutomationProperties.Name" Value="{Binding Content, RelativeSource={RelativeSource Self}}"/>
+      <Setter Property="ContentTemplate"><Setter.Value><DataTemplate>
+        <Grid>
+          <AccessText Text="{Binding}" Opacity="0" Width="0" Height="0"/>
+          <ContentControl Content="{Binding Tag, RelativeSource={RelativeSource AncestorType=Button}}"
+                          Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                          Style="{StaticResource PixelIcon}" Width="20" Height="20"/>
+        </Grid>
+      </DataTemplate></Setter.Value></Setter>
     </Style>
     <Style TargetType="ScrollBar">
       <Setter Property="Background" Value="#15170F"/><Setter Property="Width" Value="12"/>
@@ -2208,129 +2299,168 @@ function New-MonitorWindow {
   </Window.Resources>
   <Grid ClipToBounds="True">
   <Border x:Name="DimLayer" Background="{StaticResource DimBackdrop}" Visibility="Collapsed" IsHitTestVisible="False"/>
-  <Border x:Name="WindowSurface" Background="#111827" BorderThickness="0">
-    <Grid ClipToBounds="True">
-      <Grid.RowDefinitions><RowDefinition x:Name="ChromeRow" Height="23"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <Grid x:Name="AmbientField" Grid.RowSpan="3" ClipToBounds="True" IsHitTestVisible="False">
-        <Grid x:Name="LogoHost" Margin="48,28" IsHitTestVisible="False">
-          <Path x:Name="LogoPath" Fill="{StaticResource Accent}" Opacity="0.16" Stretch="Uniform" AutomationProperties.Name="Logo">
-            <Path.CacheMode><BitmapCache/></Path.CacheMode>
-          </Path>
-        </Grid>
-      </Grid>
-      <Grid x:Name="ChromeControls">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <Button x:Name="MinimizeButton" Grid.Column="1" Content="_" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Minimize"/>
-        <Button x:Name="MaximizeButton" Grid.Column="2" Content="[]" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Maximize or restore"/>
-        <Button x:Name="TitleCloseButton" Grid.Column="3" Content="X" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Close window"/>
-      </Grid>
-      <Grid x:Name="Scene" Grid.Row="1" Grid.RowSpan="2">
-      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <ScrollViewer x:Name="OperationalView" Margin="12,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}">
-          <Grid.Style><Style TargetType="Grid">
-            <Setter Property="MinHeight" Value="460"/>
-            <Style.Triggers><DataTrigger Binding="{Binding IsExpanded, ElementName=Diagnostics}" Value="True"><Setter Property="MinHeight" Value="560"/></DataTrigger></Style.Triggers>
-          </Style></Grid.Style>
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Border x:Name="WindowSurface" Background="Transparent">
+    <ScrollViewer x:Name="ShellScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Grid x:Name="Scene">
+        <Grid.RowDefinitions><RowDefinition x:Name="ChromeRow" Height="0"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <Viewbox x:Name="GhostView" Grid.Row="1" Height="500" Stretch="Uniform" HorizontalAlignment="Center">
+          <Grid Width="700" Height="572">
+            <Path x:Name="GhostBackplate" Fill="{DynamicResource SceneSurface}" Stretch="Fill" ToolTip="Trascina lo spettro per spostare la finestra"/>
+            <Grid x:Name="AmbientField" IsHitTestVisible="False">
+              <Grid x:Name="LogoHost">
+                <Path x:Name="LogoPath" Fill="{StaticResource Accent}" Opacity="0.72" Stretch="Fill" AutomationProperties.Name="Spettro DaScript">
+                  <Path.CacheMode><BitmapCache/></Path.CacheMode>
+                </Path>
+              </Grid>
+            </Grid>
+            <StackPanel x:Name="ChromeControls" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,36,0,0" Background="{DynamicResource SceneSurface}">
+              <Button x:Name="MinimizeButton" Content="Riduci a icona" Style="{StaticResource IconButton}" Tag="{StaticResource MinimizeIcon}" ToolTip="Riduci a icona"/>
+        <WrapPanel x:Name="FooterActions" Margin="0" VerticalAlignment="Center" HorizontalAlignment="Center">
+          <Button x:Name="StopButton" Style="{StaticResource IconButton}" Tag="{StaticResource StopIcon}" Content="_STOP" IsEnabled="False" ToolTip="Alt+S: cooperative stop; the current installation may finish before updates stop."/>
+          <Button x:Name="ResultLogButton" Style="{StaticResource IconButton}" Tag="{StaticResource LogIcon}" ToolTip="{Binding Content, RelativeSource={RelativeSource Self}}" Content="Visualizza _log" Visibility="Collapsed" Margin="0"/>
+          <Button x:Name="CloseButton" Style="{StaticResource IconButton}" Tag="{StaticResource CloseIcon}" Content="_Chiudi" ToolTip="Alt+C: chiude la finestra; il lavoro attivo continua in background."/>
+        </WrapPanel>
+            </StackPanel>
+            <Ellipse x:Name="UpdateShade" Width="430" Height="240" Opacity="0.35" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,205,0,0" Fill="{StaticResource TextShade}" IsHitTestVisible="False"/>
+            <Grid Width="384" Height="190" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,238,0,0">
+              <Border x:Name="UpdateCard" Background="Transparent" Padding="8,10">
+                <Grid>
+                  <StackPanel x:Name="OperationalView">
 
-          <WrapPanel Grid.Row="0" Margin="0,2,0,1">
-            <TextBlock Text="&gt; " Foreground="{StaticResource Muted}"/>
-            <TextBlock x:Name="PhaseText" Text="WAITING" FontWeight="Bold"/>
-            <TextBlock Text="   [" Foreground="{StaticResource Muted}"/>
-            <TextBlock x:Name="StatusText" Text="READING STATUS"/>
-            <TextBlock Text="]   " Foreground="{StaticResource Muted}"/>
-            <Border x:Name="Activity" Background="{StaticResource Accent}" Width="5" Height="5" Margin="0,0,6,0" Visibility="Collapsed" ToolTip="Visual pulse only; see worker and WUA timestamps."/>
-            <TextBlock x:Name="WorkerText" Text="WORKER --" Style="{StaticResource Technical}"/>
-          </WrapPanel>
-          <StackPanel Grid.Row="1">
-            <TextBlock x:Name="CurrentUpdateText" Text="UPDATE --" TextWrapping="Wrap" MaxHeight="48" TextTrimming="CharacterEllipsis"/>
-            <WrapPanel Margin="0,2,0,0">
-              <TextBlock x:Name="UpdateProgressText" Text="UPDATE --"/>
-              <TextBlock Text="   //   WUA BATCH " Style="{StaticResource Technical}"/>
-              <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
-              <TextBlock Text="  "/>
-              <TextBlock x:Name="ProgressCaption" Text="UNAVAILABLE" Style="{StaticResource Technical}"/>
-            </WrapPanel>
-            <Grid Height="5" Width="274" HorizontalAlignment="Left" Margin="13,2,0,3">
+                    <ContentControl x:Name="UpdateProgressText" Margin="0,0,0,4" Focusable="False" Effect="{StaticResource LetterContrast}"
+                                    AutomationProperties.Name="{Binding Content, RelativeSource={RelativeSource Self}}">
+                      <ContentControl.Template><ControlTemplate TargetType="ContentControl">
+                        <Viewbox Height="64" Stretch="Uniform">
+                          <Path Data="{TemplateBinding Tag}" Fill="{StaticResource Ink}"/>
+                        </Viewbox>
+                      </ControlTemplate></ContentControl.Template>
+                    </ContentControl>
+
+
+            <Grid Height="7" Width="320" HorizontalAlignment="Center" Margin="0,16,0,10">
               <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="WUA batch progress"/>
             </Grid>
-            <TextBlock x:Name="TimingText" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
-            <TextBlock x:Name="WuaResponseText" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
-            <TextBlock x:Name="DownloadText" Style="{StaticResource Technical}" TextWrapping="Wrap" Visibility="Collapsed"/>
-            <TextBlock x:Name="PhaseDetail" Style="{StaticResource Technical}" TextWrapping="Wrap"/>
-            <WrapPanel Margin="0,2,0,2" TextElement.FontSize="12" TextElement.Foreground="{StaticResource Muted}">
+
+                    <WrapPanel HorizontalAlignment="Center" Margin="0,10,0,6" TextElement.FontSize="18" TextElement.FontWeight="Bold" TextElement.Foreground="{StaticResource IconInk}" Effect="{StaticResource LetterContrast}">
+              <WrapPanel.Resources><Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style></WrapPanel.Resources>
               <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                <Path Data="M1,6 L4,9 L11,1" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                <TextBlock Text="Installed: "/><TextBlock x:Name="InstalledCount" Text="--" Foreground="{StaticResource Ink}"/>
+                <ContentControl Content="{StaticResource InstalledIcon}" Style="{StaticResource PixelIcon}" Margin="0,0,8,0" ToolTip="Installati" AutomationProperties.Name="Installati"/>
+                <TextBlock x:Name="InstalledCount" ToolTip="Installati" Text="--" Foreground="{StaticResource IconInk}"/>
               </StackPanel>
               <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                <Path Data="M6,0 L12,11 L0,11 Z M6,3 L6,7 M6,8.5 L6,9.5" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                <TextBlock Text="Errors: "/><TextBlock x:Name="FailureCount" Text="--" Foreground="{StaticResource Ink}"/>
+                <ContentControl Content="{StaticResource FailureIcon}" Style="{StaticResource PixelIcon}" Foreground="{Binding Foreground, ElementName=FailureCount}" Margin="0,0,8,0" ToolTip="Errori" AutomationProperties.Name="Errori"/>
+                <TextBlock x:Name="FailureCount" ToolTip="Errori" Text="--" Foreground="{StaticResource IconInk}"/>
               </StackPanel>
               <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                <Path Data="M6,1 A5,5 0 1 1 6,11 A5,5 0 1 1 6,1 M2.5,9.5 L9.5,2.5" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                <TextBlock Text="Excluded: "/><TextBlock x:Name="SkippedCount" Text="--" Foreground="{StaticResource Ink}"/>
+                <ContentControl Content="{StaticResource SkippedIcon}" Style="{StaticResource PixelIcon}" Margin="0,0,8,0" ToolTip="Esclusi" AutomationProperties.Name="Esclusi"/>
+                <TextBlock x:Name="SkippedCount" ToolTip="Esclusi" Text="--" Foreground="{StaticResource IconInk}"/>
               </StackPanel>
               <StackPanel Orientation="Horizontal">
-                <Path Data="M10,4 A5,5 0 1 0 11,8 M10,0 L10,4 L6,4" Width="12" Height="12" Stretch="Uniform" Stroke="{StaticResource Muted}" StrokeThickness="1.2" Margin="0,0,5,0" VerticalAlignment="Center"/>
-                <TextBlock Text="Reboots: "/><TextBlock x:Name="RebootCount" Text="--" Foreground="{StaticResource Ink}"/>
+                <ContentControl Content="{StaticResource RebootIcon}" Style="{StaticResource PixelIcon}" Margin="0,0,8,0" ToolTip="Riavvii" AutomationProperties.Name="Riavvii"/>
+                <TextBlock x:Name="RebootCount" ToolTip="Riavvii" Text="--" Foreground="{StaticResource IconInk}"/>
               </StackPanel>
             </WrapPanel>
-          </StackPanel>
-          <ScrollViewer Grid.Row="2" MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
-            <TextBlock x:Name="DetailText" Text="Reading status..." TextWrapping="Wrap"/>
-          </ScrollViewer>
-          <StackPanel Grid.Row="3">
-            <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" Foreground="{StaticResource Muted}" FontSize="11" IsExpanded="False">
-              <TextBox x:Name="DiagnosticsText" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="80" VerticalScrollBarVisibility="Auto"
-                       Background="Transparent" Foreground="{StaticResource Muted}" BorderThickness="0" SelectionBrush="#8D783B"/>
-            </Expander>
-            <TextBlock Text="&gt;&gt; Activity // Memory only // Latest 60 lines" Foreground="#8F7F4A" FontSize="11" Margin="0,2,0,3"/>
-          </StackPanel>
-          <Grid x:Name="TerminalField" Grid.Row="4" ClipToBounds="True" MinHeight="110">
-            <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
-                   FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
-                   HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
-          </Grid>
-        </Grid>
-      </ScrollViewer>
-      <ScrollViewer x:Name="OutcomeView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="28,16,28,12" VerticalAlignment="Center">
-          <Path x:Name="OutcomeGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#9DE6ED" Height="160" Stretch="Uniform" RenderTransformOrigin="0.5,0.5" Margin="0,0,0,24">
+                  </StackPanel>
+                  <ScrollViewer x:Name="OutcomeView"  Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="6" VerticalAlignment="Center">
+          <Path x:Name="OutcomeGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#9DE6ED" Visibility="Collapsed" Height="160" Stretch="Uniform" RenderTransformOrigin="0.5,0.5" Margin="0,0,0,24">
             <Path.CacheMode><BitmapCache RenderAtScale="2"/></Path.CacheMode>
           </Path>
-          <StackPanel x:Name="OutcomeMessage">
-            <Viewbox Stretch="Uniform" Height="48" Margin="0,0,0,16">
+          <StackPanel x:Name="OutcomeMessage" Effect="{StaticResource LetterContrast}">
+            <Viewbox Stretch="Uniform" Height="38" Margin="0,0,0,10">
               <Path x:Name="OutcomeTitle" Fill="#9DE6ED"/>
             </Viewbox>
-            <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="16" Foreground="#EDF1FA"/>
-            <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="#B8C3D9" Margin="0,16,0,0"/>
+            <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="15" Foreground="#EDF1FA"/>
+            <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="#B8C3D9" Margin="0,6,0,0"/>
             <TextBox x:Name="OutcomeDetail" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="76" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"
                      Background="Transparent" Foreground="#CED5E5" BorderThickness="0" FontSize="12" AutomationProperties.Name="Dettaglio dell'esito"/>
           </StackPanel>
         </StackPanel>
       </ScrollViewer>
-      <StackPanel Grid.Row="1" Margin="12,3,12,7">
-        <ScrollViewer MaxHeight="50" VerticalScrollBarVisibility="Auto">
-          <TextBlock x:Name="NoticeText" Text="Closing this window does not stop updates." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="11"/>
-        </ScrollViewer>
-        <WrapPanel x:Name="FooterActions" Margin="0,10,0,4" VerticalAlignment="Center" HorizontalAlignment="Center">
-          <TextBlock x:Name="PromptMark" Text="&gt;&gt; " VerticalAlignment="Center" Foreground="{StaticResource Accent}"/>
-          <Button x:Name="StopButton" Content="_STOP [alt+s]" IsEnabled="False" ToolTip="Cooperative stop: the current installation may finish before updates stop."/>
-          <TextBlock x:Name="StopSeparator" Text=" / " VerticalAlignment="Center" Foreground="{StaticResource Muted}"/>
-          <Button x:Name="ResultLogButton" Content="Visualizza _log" Visibility="Collapsed" Margin="0,0,18,0"/>
-          <Button x:Name="CloseButton" Content="_Chiudi [alt+c]" ToolTip="Chiude la finestra; il lavoro attivo continua in background."/>
-          <TextBlock x:Name="PromptCursor" Text="_" Margin="6,0,0,0" VerticalAlignment="Center"/>
-        </WrapPanel>
-      </StackPanel>
-      </Grid>
-      <Rectangle x:Name="TerminalTexture" Grid.Row="1" Grid.RowSpan="2" IsHitTestVisible="False" Opacity="0.045"><Rectangle.Fill>
+                </Grid>
+              </Border>
+              <Rectangle x:Name="TerminalTexture" IsHitTestVisible="False" Opacity="0.045" OpacityMask="{StaticResource TextShade}">
+        <Rectangle.RenderTransform><TranslateTransform x:Name="TextureOffset"/></Rectangle.RenderTransform>
+        <Rectangle.Fill>
         <DrawingBrush TileMode="Tile" Viewport="0,0,4,4" ViewportUnits="Absolute" Viewbox="0,0,4,4" ViewboxUnits="Absolute">
           <DrawingBrush.Drawing><GeometryDrawing Brush="#BDA04B" Geometry="M 0,0 L 4,0 4,1 0,1 Z"/></DrawingBrush.Drawing>
         </DrawingBrush>
       </Rectangle.Fill></Rectangle>
-    </Grid>
+              <Rectangle x:Name="TerminalSweep" Visibility="Collapsed" IsHitTestVisible="False" OpacityMask="{StaticResource TextShade}"><Rectangle.Fill>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#00E5C56C" Offset="0"/><GradientStop Color="#10E5C56C" Offset="0.04"/><GradientStop Color="#00E5C56C" Offset="0.12"/>
+            <LinearGradientBrush.RelativeTransform><TranslateTransform x:Name="ScanOffset" Y="-0.2"/></LinearGradientBrush.RelativeTransform>
+          </LinearGradientBrush>
+        </Rectangle.Fill></Rectangle>
+            </Grid>
+          </Grid>
+        </Viewbox>
+        <StackPanel Grid.Row="2" Width="600" HorizontalAlignment="Center">
+          <Border Width="2" Height="10" Background="{StaticResource Rule}"/>
+          <Expander x:Name="ActivityLog" Header="ACTIVITY" IsExpanded="True" Foreground="{StaticResource Muted}" FontSize="14" ToolTip="Latest 60 lines">
+            <Grid>
+              <Border x:Name="ActivityPanel" Background="{DynamicResource SceneSurface}" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="140" Margin="0">
+            <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
+                   FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
+                   HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
+          </Grid></Border>
+              <Path Data="{Binding Clip, ElementName=ActivityPanel}" Stroke="{StaticResource Rule}" StrokeThickness="1" IsHitTestVisible="False"/>
+
+            </Grid>
+          </Expander>
+          <Border Width="2" Height="6" Background="{StaticResource Rule}"/>
+          <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" IsExpanded="False" Foreground="{StaticResource Muted}" FontSize="14">
+            <Grid>
+              <Border x:Name="DiagnosticsPanel" Background="{DynamicResource SceneSurface}" Padding="16,10">
+                <ScrollViewer MaxHeight="190" VerticalScrollBarVisibility="Auto">
+                  <StackPanel>
+                    <WrapPanel  HorizontalAlignment="Center" TextElement.FontSize="10" Margin="0,2,0,4">
+            <TextBlock Text="&gt; " Foreground="{StaticResource Muted}"/>
+            <TextBlock x:Name="PhaseText" Text="WAITING" FontWeight="Bold"/>
+            <TextBlock Text=" [" Foreground="{StaticResource Muted}"/>
+            <TextBlock x:Name="StatusText" Text="READING STATUS"/>
+            <TextBlock Text="]" Foreground="{StaticResource Muted}"/>
+</WrapPanel>
+            <TextBlock x:Name="CurrentUpdateText" Text="UPDATE --" TextWrapping="Wrap" TextAlignment="Center" MaxHeight="30" FontSize="11" TextTrimming="CharacterEllipsis"/>
+            <WrapPanel HorizontalAlignment="Center" Margin="0,6,0,0">
+              <TextBlock Text="WUA BATCH " Style="{StaticResource Technical}"/>
+              <TextBlock x:Name="ProgressText" Text="--" FontWeight="Bold"/>
+              <TextBlock Text="  "/>
+              <TextBlock x:Name="ProgressCaption" Text="UNAVAILABLE" Style="{StaticResource Technical}"/>
+            </WrapPanel>
+        <ScrollViewer MaxHeight="50" VerticalScrollBarVisibility="Auto">
+          <TextBlock x:Name="NoticeText" Text="Closing this window does not stop updates." Foreground="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center" FontSize="11"/>
+        </ScrollViewer>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Border x:Name="Activity" Background="{StaticResource Accent}" Width="5" Height="5" Margin="0,0,6,0" Visibility="Collapsed" ToolTip="Visual pulse only; see worker and WUA timestamps."/> <TextBlock x:Name="WorkerText" Text="WORKER --" Style="{StaticResource Technical}"/></StackPanel>
+                                <TextBlock x:Name="TimingText" Style="{StaticResource Technical}" TextWrapping="Wrap" TextAlignment="Center"/>
+            <TextBlock x:Name="WuaResponseText" Style="{StaticResource Technical}" TextWrapping="Wrap" TextAlignment="Center"/>
+            <TextBlock x:Name="DownloadText" Style="{StaticResource Technical}" TextWrapping="Wrap" TextAlignment="Center" Visibility="Collapsed"/>
+            <TextBlock x:Name="PhaseDetail" Style="{StaticResource Technical}" TextWrapping="Wrap" TextAlignment="Center"/>
+
+                    <ScrollViewer  MaxHeight="60" VerticalScrollBarVisibility="Auto" Margin="0,2,0,3">
+            <TextBlock x:Name="DetailText" Text="Reading status..." TextWrapping="Wrap" TextAlignment="Center"/>
+          </ScrollViewer>
+                    <Border Height="1" Background="{StaticResource Rule}" Margin="0,8"/>
+                    <TextBox x:Name="DiagnosticsText" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="80" VerticalScrollBarVisibility="Auto"
+                       Background="Transparent" Foreground="{StaticResource Muted}" BorderThickness="0" SelectionBrush="#8D783B"/>
+                  </StackPanel>
+                </ScrollViewer>
+              </Border>
+              <Path Data="{Binding Clip, ElementName=DiagnosticsPanel}" Stroke="{StaticResource Rule}" StrokeThickness="1" IsHitTestVisible="False"/>
+            </Grid>
+          </Expander>
+          <StackPanel x:Name="PreviewControls" Visibility="Collapsed" Margin="0,0,0,8" Background="{DynamicResource SceneSurface}">
+        <TextBlock Text="DaScript / ANTEPRIMA UI / Dati dimostrativi, nessun aggiornamento o riavvio" TextWrapping="Wrap" TextAlignment="Center" FontSize="11" Margin="0,0,0,6"/>
+        <WrapPanel HorizontalAlignment="Center">
+          <Button x:Name="PreviewPrevious" Content="&lt; Precedente" Margin="0,0,10,0"/>
+          <ComboBox x:Name="PreviewSelector" Width="245" Foreground="#111827" AutomationProperties.Name="Schermata di anteprima"/>
+          <Button x:Name="PreviewNext" Content="Successiva &gt;" Margin="10,0,10,0"/>
+          <Button x:Name="PreviewIntro" Content="Rivedi intro"/>
+        </WrapPanel>
+      </StackPanel>
+        </StackPanel>
+      </Grid>
+    </ScrollViewer>
   </Border>
       <Grid x:Name="IntroLayer" Background="Transparent" Visibility="Collapsed" IsHitTestVisible="False" ClipToBounds="True">
         <Path x:Name="IntroGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#F1EDFF" Width="600" Height="492" Stretch="Uniform"
@@ -2351,32 +2481,69 @@ function New-MonitorWindow {
     $window.MinWidth = [Math]::Min($window.MinWidth, $area.Width)
     $window.MinHeight = [Math]::Min($window.MinHeight, $area.Height)
     $window.Width = [Math]::Min($window.Width, $area.Width)
-    $window.Height = [Math]::Min($window.Height, $area.Height)
+    $window.MaxHeight = $area.Height
+    $window.FindName('GhostView').Height = [Math]::Min(500, [Math]::Max(300, $area.Height-120))
+    foreach ($name in @('ActivityPanel','DiagnosticsPanel')) {
+        $window.FindName($name).add_SizeChanged({ param($sender, $eventArgs)
+            Update-MonitorFrame $sender
+        })
+    }
+    $window.FindName('GhostBackplate').add_MouseLeftButtonDown({ param($sender, $eventArgs)
+        if ($eventArgs.LeftButton -eq 'Pressed') {
+            [Windows.Window]::GetWindow($sender).DragMove()
+            $eventArgs.Handled = $true
+        }
+    })
+    foreach ($name in @('ActivityLog','Diagnostics')) {
+        $resize = { param($sender, $eventArgs)
+            $target = [Windows.Window]::GetWindow($sender)
+            if ($target.IsLoaded -and $null -eq $target.Tag.WindowPlacement -and $target.WindowState -eq 'Normal') {
+                $target.SizeToContent = 'Height'
+                $target.UpdateLayout()
+                $area = [Windows.SystemParameters]::WorkArea
+                if ($target.Top -ge $area.Top -and $target.Top -lt $area.Bottom) {
+                    $target.Top = [Math]::Max($area.Top, [Math]::Min($target.Top, $area.Bottom-$target.ActualHeight))
+                }
+            }
+        }
+        $window.FindName($name).add_Expanded($resize)
+        $window.FindName($name).add_Collapsed($resize)
+    }
     $window.FindName('MinimizeButton').add_Click({ param($sender, $eventArgs)
         [Windows.SystemCommands]::MinimizeWindow([Windows.Window]::GetWindow($sender))
     })
-    $window.FindName('MaximizeButton').add_Click({ param($sender, $eventArgs)
-        $target = [Windows.Window]::GetWindow($sender)
-        if ($target.WindowState -eq 'Maximized') { [Windows.SystemCommands]::RestoreWindow($target) }
-        else { [Windows.SystemCommands]::MaximizeWindow($target) }
-    })
-    $window.FindName('TitleCloseButton').add_Click({ param($sender, $eventArgs)
-        [Windows.SystemCommands]::CloseWindow([Windows.Window]::GetWindow($sender))
-    })
     $geometry = Get-MonitorLogoGeometry
     $window.FindName('LogoPath').Data = $geometry
+    # The largest closed figure is the outer silhouette; smaller figures are the distressed cutouts.
+    $outline = $null
+    $largestArea = 0.0
+    foreach ($figure in [Windows.Media.PathGeometry]::CreateFromGeometry($geometry).Figures) {
+        if (-not $figure.IsClosed) { continue }
+        $candidate = [Windows.Media.PathGeometry]::new()
+        $candidate.Figures.Add($figure)
+        $area = $candidate.GetArea()
+        if ($area -gt $largestArea) { $largestArea = $area; $outline = $candidate }
+    }
+    if ($null -eq $outline) { throw 'The embedded ghost has no closed silhouette.' }
+    $outline.Freeze()
+    $window.FindName('GhostBackplate').Data = $outline
+    $drawing = [Windows.Media.GeometryDrawing]::new([Windows.Media.BrushConverter]::new().ConvertFromString('#F1EDFF'), $null, $geometry)
+    $window.Icon = [Windows.Media.DrawingImage]::new($drawing)
+    $window.Icon.Freeze()
     $window.Tag = [pscustomobject]@{
-        Outcome=''; ShowLog=$false; Motion=$true; Intro=$false; Storyboard=$null; Pulse=$false
+        Outcome=''; ShowLog=$false; Motion=$true; Intro=$false; Storyboard=$null; Pulse=$false; Ambient=$false
         AlternateColor=[Windows.Media.Colors]::White
         WindowPlacement=$null; Closing=$false; ChangingPlacement=$false
-        SceneBackground=$window.FindName('WindowSurface').Background
+        SceneBackground=$window.Resources['SceneSurface'].Clone()
     }
     $window.FindName('LogoHost').Tag = [pscustomobject]@{ Index=0L; Random=[Random]::new() }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
+    Set-MonitorUpdateTitle $window 'UPDATE --'
     $window.FindName('ResultLogButton').add_Click({ param($sender, $eventArgs)
         $target = [Windows.Window]::GetWindow($sender)
         Stop-MonitorTransition $target
         $target.Tag.ShowLog = -not $target.Tag.ShowLog
+        if ($target.Tag.ShowLog) { $target.FindName('ActivityLog').IsExpanded = $true }
         Set-MonitorScene $target
     })
     $window.add_Loaded({ param($sender, $eventArgs)
@@ -2385,6 +2552,7 @@ function New-MonitorWindow {
             Start-MonitorTransition $sender 'GhostAttack'
         }
         Set-MonitorOutcomePulse $sender
+        Set-MonitorAmbientAnimation $sender
     })
     $window.add_StateChanged({ param($sender, $eventArgs)
         if (-not $sender.Tag.ChangingPlacement -and
@@ -2392,16 +2560,19 @@ function New-MonitorWindow {
             Stop-MonitorTransition $sender
         }
         Set-MonitorOutcomePulse $sender
+        Set-MonitorAmbientAnimation $sender
     })
     $window.add_PreviewKeyDown({ param($sender, $eventArgs)
         if ($eventArgs.Key -eq 'Escape' -and $null -ne $sender.Tag.WindowPlacement) {
             Stop-MonitorTransition $sender
             Set-MonitorOutcomePulse $sender
+            Set-MonitorAmbientAnimation $sender
             $eventArgs.Handled = $true
         }
     })
     $window.add_Closed({ param($sender, $eventArgs)
         Set-MonitorOutcomePulse $sender -Stop
+        Set-MonitorAmbientAnimation $sender -Stop
         $sender.Tag.Closing = $true
         Stop-MonitorTransition $sender
     })
@@ -2410,8 +2581,9 @@ function New-MonitorWindow {
         $target = $window
         $stopTransition = ${function:Stop-MonitorTransition}
         $syncPulse = ${function:Set-MonitorOutcomePulse}
+        $syncAmbient = ${function:Set-MonitorAmbientAnimation}
         $animation.add_Completed({
-            if ($target.Tag.Storyboard -eq $animation) { & $stopTransition $target; & $syncPulse $target }
+            if ($target.Tag.Storyboard -eq $animation) { & $stopTransition $target; & $syncPulse $target; & $syncAmbient $target }
         }.GetNewClosure())
     }
     return $window
@@ -2438,7 +2610,7 @@ function Stop-MonitorTransition {
         $Window.Top = $placement.Bounds.Top
         $Window.Width = $placement.Bounds.Width
         $Window.Height = $placement.Bounds.Height
-        $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(23)
+        $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(0)
         $Window.FindName('ChromeControls').Visibility = 'Visible'
         $Window.FindName('Scene').IsHitTestVisible = $true
         $Window.FindName('OutcomeGhost').Height = 160
@@ -2449,10 +2621,12 @@ function Stop-MonitorTransition {
         $surface.HorizontalAlignment = 'Stretch'
         $surface.VerticalAlignment = 'Stretch'
         $surface.IsHitTestVisible = $true
-        $surface.Background = $Window.Tag.SceneBackground
+        $surface.Background = [Windows.Media.Brushes]::Transparent
         $Window.FindName('DimLayer').Visibility = 'Collapsed'
         $Window.FindName('TerminalTexture').Visibility = 'Visible'
-        $Window.FindName('AmbientField').Visibility = $(if ($Window.Tag.Outcome -and -not $Window.Tag.ShowLog) { 'Collapsed' } else { 'Visible' })
+        $Window.FindName('AmbientField').Visibility = 'Visible'
+        $Window.MaxHeight = $placement.MaxHeight
+        $Window.SizeToContent = $placement.SizeToContent
         $Window.WindowState = $placement.State
     } finally { $Window.Tag.ChangingPlacement = $false }
 }
@@ -2462,6 +2636,7 @@ function Start-MonitorTransition {
     if ($Name -ne 'GhostAttack') { return }
     Stop-MonitorTransition $Window
     Set-MonitorOutcomePulse $Window -Stop
+    Set-MonitorAmbientAnimation $Window -Stop
     try {
         if (-not $Window.Tag.Motion -or -not $Window.IsLoaded -or $Window.WindowState -eq 'Minimized' -or
             -not [Windows.SystemParameters]::ClientAreaAnimation -or [Windows.SystemParameters]::HighContrast -or
@@ -2469,6 +2644,7 @@ function Start-MonitorTransition {
         $Window.Tag.WindowPlacement = [pscustomobject]@{
             Bounds=$Window.RestoreBounds; State=$Window.WindowState; ResizeMode=$Window.ResizeMode
             Chrome=[Windows.Shell.WindowChrome]::GetWindowChrome($Window); Name=$Name
+            SizeToContent=$Window.SizeToContent; MaxHeight=$Window.MaxHeight
         }
         $appOrigin = $Window.PointToScreen([Windows.Point]::new(0,0))
         $appSize = [Windows.Size]::new($Window.ActualWidth, $Window.ActualHeight)
@@ -2477,6 +2653,8 @@ function Start-MonitorTransition {
         [Windows.Shell.WindowChrome]::SetWindowChrome($Window, $null)
         # Removing WindowChrome resets the native target to SystemColors.WindowColor.
         [Windows.PresentationSource]::FromVisual($Window).CompositionTarget.BackgroundColor = [Windows.Media.Colors]::Transparent
+        $Window.SizeToContent = 'Manual'
+        $Window.MaxHeight = [double]::PositiveInfinity
         $Window.ResizeMode = 'NoResize'
         $Window.FindName('ChromeControls').Visibility = 'Collapsed'
         $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(0)
@@ -2499,11 +2677,11 @@ function Start-MonitorTransition {
             $surface.Width = $appSize.Width
             $surface.Height = $appSize.Height
             $surface.Margin = [Windows.Thickness]::new($origin.X, $origin.Y, 0, 0)
-            $surface.Background = $Window.Tag.SceneBackground
+            $surface.Background = [Windows.Media.Brushes]::Transparent
             $Window.FindName('ChromeControls').Visibility = 'Visible'
-            $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(23)
+            $Window.FindName('ChromeRow').Height = [Windows.GridLength]::new(0)
             $Window.FindName('TerminalTexture').Visibility = 'Visible'
-            $Window.FindName('AmbientField').Visibility = $(if ($Window.Tag.Outcome -and -not $Window.Tag.ShowLog) { 'Collapsed' } else { 'Visible' })
+            $Window.FindName('AmbientField').Visibility = 'Visible'
             $scale = 2.4 * [Math]::Max($Window.ActualWidth/600, $Window.ActualHeight/492)
             $readableScale = 0.85 * [Math]::Min($Window.ActualWidth/600, $Window.ActualHeight/492)
             foreach ($timeline in $Window.Resources[$Name].Children) {
@@ -2558,7 +2736,7 @@ function Get-MonitorOutcome {
 }
 
 function Get-MonitorPixelTitle {
-    param([string]$Text)
+    param([string]$Text, [switch]$Distressed)
     # Small native vector alphabet: no font download, bitmap scaling or ASCII line wrapping.
     $glyphs = @{
         A='01110/10001/10001/11111/10001/10001/10001'; C='01111/10000/10000/10000/10000/10000/01111'
@@ -2571,6 +2749,12 @@ function Get-MonitorPixelTitle {
         R='11110/10001/10001/11110/10100/10010/10001'; S='01111/10000/10000/01110/00001/00001/11110'
         T='11111/00100/00100/00100/00100/00100/00100'; U='10001/10001/10001/10001/10001/10001/01110'
         V='10001/10001/10001/10001/10001/01010/00100'; Z='11111/00001/00010/00100/01000/10000/11111'
+        '0'='01110/10001/10011/10101/11001/10001/01110'; '1'='00100/01100/00100/00100/00100/00100/01110'
+        '2'='01110/10001/00001/00010/00100/01000/11111'; '3'='11110/00001/00001/01110/00001/00001/11110'
+        '4'='00010/00110/01010/10010/11111/00010/00010'; '5'='11111/10000/10000/11110/00001/00001/11110'
+        '6'='01110/10000/10000/11110/10001/10001/01110'; '7'='11111/00001/00010/00100/01000/01000/01000'
+        '8'='01110/10001/10001/01110/10001/10001/01110'; '9'='01110/10001/10001/01111/00001/00001/01110'
+        '%'='11001/11001/00010/00100/01000/10011/10011'; '-'='000/000/000/111/000/000/000'
     }
     $geometry = [Windows.Media.GeometryGroup]::new()
     $x = 0
@@ -2581,6 +2765,10 @@ function Get-MonitorPixelTitle {
             for ($column=0; $column -lt $rows[$y].Length; $column++) {
                 if ($rows[$y][$column] -eq '1') {
                     $geometry.Children.Add([Windows.Media.RectangleGeometry]::new([Windows.Rect]::new($x+$column*4, $y*4, 4, 4)))
+                    if ($Distressed -and (($x/4 + $column*3 + $y*5) % 11) -eq 0) {
+                        # EvenOdd fill cuts small, stable chips out of lit pixels.
+                        $geometry.Children.Add([Windows.Media.RectangleGeometry]::new([Windows.Rect]::new($x+$column*4+2, $y*4, 2, 1)))
+                    }
                 }
             }
         }
@@ -2588,6 +2776,29 @@ function Get-MonitorPixelTitle {
     }
     $geometry.Freeze()
     return $geometry
+}
+
+function Set-MonitorUpdateTitle {
+    param([object]$Window, [string]$Text)
+    $title = $Window.FindName('UpdateProgressText')
+    if ($title.Content -ceq $Text) { return }
+    $title.Tag = Get-MonitorPixelTitle $Text -Distressed
+    $title.Content = $Text
+}
+
+function Set-MonitorAmbientAnimation {
+    param([object]$Window, [switch]$Stop)
+    $enabled = -not $Stop -and -not $Window.Tag.Outcome -and -not $Window.Tag.ShowLog -and
+        $Window.IsLoaded -and -not $Window.Tag.Closing -and $Window.WindowState -ne 'Minimized' -and
+        $null -eq $Window.Tag.Storyboard -and $null -eq $Window.Tag.WindowPlacement -and
+        $Window.Tag.Motion -and [Windows.SystemParameters]::ClientAreaAnimation -and
+        -not [Windows.SystemParameters]::HighContrast -and ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
+    if ([bool]$enabled -eq $Window.Tag.Ambient) { return }
+    # Native clocks animate decoration only, independently of WUA progress and log content.
+    if ($enabled) { $Window.Resources['TerminalAmbient'].Begin($Window, $true) }
+    else { $Window.Resources['TerminalAmbient'].Remove($Window) }
+    $Window.FindName('TerminalSweep').Visibility = $(if ($enabled) { 'Visible' } else { 'Collapsed' })
+    $Window.Tag.Ambient = [bool]$enabled
 }
 
 function Set-MonitorOutcomePulse {
@@ -2617,20 +2828,23 @@ function Set-MonitorScene {
     $showResult = $result -and -not $Window.Tag.ShowLog
     $Window.FindName('OperationalView').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
     $Window.FindName('OutcomeView').Visibility = $(if ($showResult) { 'Visible' } else { 'Collapsed' })
-    $Window.FindName('AmbientField').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
-    $Window.FindName('WindowSurface').Background = $Window.Tag.SceneBackground
+    $Window.FindName('AmbientField').Visibility = 'Visible'
+    # Resource lookup may freeze brushes; keep the animated brush on the controls themselves.
+    $Window.FindName('GhostBackplate').Fill = $Window.Tag.SceneBackground
+    foreach ($name in @('ActivityPanel','DiagnosticsPanel','ChromeControls')) {
+        $Window.FindName($name).Background = $Window.Tag.SceneBackground
+    }
+    $Window.FindName('LogoPath').Fill = $(if ($result) { $Window.FindName('OutcomeTitle').Fill } else { $Window.Resources['Accent'] })
     $Window.FindName('ResultLogButton').Visibility = $(if ($result) { 'Visible' } else { 'Collapsed' })
     $Window.FindName('ResultLogButton').Content = $(if ($Window.Tag.ShowLog) { 'Torna all''_esito' } else { 'Visualizza _log' })
     $Window.FindName('StopButton').Visibility = $(if ($result -and $Window.Tag.Outcome -ne 'Reboot') { 'Collapsed' } else { 'Visible' })
-    $Window.FindName('StopSeparator').Visibility = $Window.FindName('StopButton').Visibility
-    foreach ($name in @('NoticeText','PromptMark','PromptCursor')) {
-        $Window.FindName($name).Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
-    }
-    $ink = if ($result) { [Windows.Media.SolidColorBrush]::new($Window.FindName('OutcomeTitle').Fill.GetAnimationBaseValue([Windows.Media.SolidColorBrush]::ColorProperty)) } else { $Window.Resources['Ink'] }
+    $Window.FindName('NoticeText').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
+    $ink = if ($result) { [Windows.Media.SolidColorBrush]::new($Window.FindName('OutcomeTitle').Fill.GetAnimationBaseValue([Windows.Media.SolidColorBrush]::ColorProperty)) } else { $Window.Resources['IconInk'] }
     foreach ($control in $Window.FindName('FooterActions').Children) {
         if ($control -is [Windows.Controls.Button]) { $control.Foreground = $ink }
     }
     Set-MonitorOutcomePulse $Window
+    Set-MonitorAmbientAnimation $Window
 }
 
 function Update-MonitorOutcome {
@@ -2683,6 +2897,7 @@ function Update-MonitorOutcome {
 function Update-MonitorAnimation {
     param([object]$Window)
     Set-MonitorOutcomePulse $Window
+    Set-MonitorAmbientAnimation $Window
     Update-MonitorLog $Window -Immediate:($Window.WindowState -eq 'Minimized' -or -not $Window.Tag.Motion)
     if ($Window.WindowState -ne 'Minimized') {
         $Window.FindName('LogoHost').Tag.Index++
@@ -2735,6 +2950,32 @@ function Format-MonitorDuration {
     return ('{0:00}:{1:00}:{2:00}' -f [Math]::Floor($span.TotalHours), $span.Minutes, $span.Seconds)
 }
 
+function Update-MonitorTitle {
+    param([object]$Window, [object]$Snapshot)
+    $state = $Snapshot.State
+    $labels = @{
+        Queued='In attesa'; Scan='Ricerca'; Download='Download'; Install='Installazione'
+        Verify='Verifica'; Resume='Ripresa'; Retry='Attesa nuovo tentativo'
+        RestartCountdown='Riavvio richiesto'; Restart='Riavvio confermato'; WaitingForReboot='Riavvio richiesto'
+        Cancelling='Arresto in corso'; OperationStillRunning='Operazione ancora attiva'
+        Completed='Completato'; CompletedWithExclusions='Completato con esclusioni'
+        CompletedWithErrors='Completato con errori'; Blocked='Bloccato'; Stopped='Interrotto'
+    }
+    $phase = if ($state.Status -in $script:TerminalStates) { [string]$state.Status } else { [string]$state.Phase }
+    $label = if ($labels.ContainsKey($phase)) { $labels[$phase] } else { 'In corso' }
+    if ($Snapshot.StopRequested -and $state.Status -notin $script:TerminalStates -and -not $state.RebootCommitted) { $label = 'Arresto richiesto' }
+    if ($state.Status -eq 'Completed' -and @($state.Installed).Count -eq 0) { $label = 'Nessun aggiornamento' }
+    if ($state.Status -eq 'Blocked' -and $state.ActiveOperation) { $label = 'Bloccato - operazione incerta' }
+    $title = 'Update - ' + $label
+    # Reuse validated, current telemetry; never infer overall completion from a percentage.
+    if ($Window.FindName('ProgressCaption').Text -eq 'CURRENT OPERATION') {
+        $title += ' - batch ' + $Window.FindName('ProgressText').Text
+    } elseif ($Window.FindName('ProgressCaption').Text -eq 'LAST REPORTED COUNTDOWN') {
+        $title += ' - ultimo countdown ' + $Window.FindName('ProgressText').Text
+    }
+    if ($Window.Title -cne $title) { $Window.Title = $title }
+}
+
 function Update-MonitorTelemetry {
     param([object]$Window, [object]$Snapshot, [DateTime]$Now=[DateTime]::UtcNow)
     $state = $Snapshot.State
@@ -2755,7 +2996,7 @@ function Update-MonitorTelemetry {
     $Window.FindName('Progress').Value = 0
     $Window.FindName('ProgressText').Text = '--'
     $Window.FindName('ProgressCaption').Text = 'UNAVAILABLE'
-    $Window.FindName('UpdateProgressText').Text = 'UPDATE --'
+    $updateTitle = 'UPDATE --'
     $Window.FindName('CurrentUpdateText').Text = 'UPDATE --'
     $Window.FindName('CurrentUpdateText').ToolTip = $null
     $Window.FindName('TimingText').Text = 'ELAPSED -- // LAST CHANGE --'
@@ -2791,7 +3032,7 @@ function Update-MonitorTelemetry {
                     $Window.FindName('CurrentUpdateText').Text = "UPDATE $($sample.Index+1)/$($sample.Count) // $title"
                     $Window.FindName('CurrentUpdateText').ToolTip = $title
                     $percent = Get-WuaProgressNumber $sample 'UpdatePercent' 100
-                    if ($null -ne $percent) { $Window.FindName('UpdateProgressText').Text = "UPDATE $percent%" }
+                    if ($null -ne $percent) { $updateTitle = "UPDATE $percent%" }
                 }
                 $percent = Get-WuaProgressNumber $state 'ProgressPercent' 100
                 if ($null -ne $percent) {
@@ -2824,6 +3065,8 @@ function Update-MonitorTelemetry {
     }
     $box = $Window.FindName('DiagnosticsText')
     if ($box.Text -cne $diagnostic) { $box.Text = $diagnostic }
+    Set-MonitorUpdateTitle $Window $updateTitle
+    Update-MonitorTitle $Window $Snapshot
 }
 
 function Update-MonitorView {
@@ -2866,7 +3109,7 @@ function Update-MonitorView {
     $failures = @($state.Failures | Where-Object { -not $_.Resolved }).Count
     $Window.FindName('InstalledCount').Text = [string]@($state.Installed).Count
     $Window.FindName('FailureCount').Text = [string]$failures
-    $Window.FindName('FailureCount').Foreground = $Window.Resources[$(if ($failures) { 'Error' } else { 'Ink' })]
+    $Window.FindName('FailureCount').Foreground = $Window.Resources[$(if ($failures) { 'Error' } else { 'IconInk' })]
     $Window.FindName('SkippedCount').Text = [string]@($state.Skipped).Count
     $Window.FindName('RebootCount').Text = [string]$state.Reboots
     $Window.FindName('Progress').Foreground = $brush
@@ -2937,6 +3180,127 @@ function New-MonitorReader {
     return $reader
 }
 
+function New-MonitorPreviewSnapshot {
+    param([string]$Scene)
+    $now = [DateTime]::UtcNow
+    $state = [pscustomobject]@{
+        Status='Running'; Phase=$Scene; Message='ANTEPRIMA: dati dimostrativi, nessuna operazione sul sistema.'
+        UpdatedUtc=$now.ToString('o'); Scans=2; Reboots=0
+        Installed=@(); Failures=@(); Skipped=@()
+    }
+    Initialize-RuntimeState $state
+    if ($Scene -in @('Scan','Download','Install','StopPending','Stale','ActiveError')) {
+        $state.ActiveOperation = if ($Scene -eq 'Scan') { 'Scan' } elseif ($Scene -eq 'Download') { 'Download' } else { 'Install' }
+        $state.Phase = $state.ActiveOperation
+        $state.OperationStartedUtc = $now.AddMinutes(-10).ToString('o')
+        $state.OperationBootId = 'preview'
+        if ($Scene -ne 'Scan') {
+            $state.ProgressPercent = 42
+            $state.WuaProgress = New-WuaProgress
+            $state.WuaProgress.Index = 2
+            $state.WuaProgress.Count = 8
+            $state.WuaProgress.Title = 'Aggiornamento cumulativo Windows - esempio dimostrativo'
+            $state.WuaProgress.UpdatePercent = 21
+            $state.WuaProgress.BatchPercent = 42
+            $state.WuaProgress.ObservedUtc = $now.AddMinutes(-5).ToString('o')
+            $state.WuaProgress.LastResponseUtc = $now.ToString('o')
+            $state.WuaProgress.LastChangeUtc = $now.AddMinutes(-3).ToString('o')
+            if ($Scene -eq 'Download') {
+                $state.WuaProgress.DownloadPhase = 2
+                $state.WuaProgress.TotalBytesDownloaded = 420MB
+                $state.WuaProgress.TotalBytesToDownload = 1000MB
+            }
+        }
+    }
+    switch ($Scene) {
+        'Stale' { $state.UpdatedUtc = $now.AddMinutes(-2).ToString('o') }
+        'ActiveError' { $state.Status='Blocked'; $state.Phase='OperationStillRunning'; $state.Message='ANTEPRIMA: operazione WUA di esito incerto; verificare il sistema.' }
+        'NoUpdates' { $state.Status='Completed'; $state.Phase=$state.Status }
+        'Completed' { $state.Status='Completed'; $state.Phase=$state.Status }
+        'Partial' { $state.Status='CompletedWithErrors'; $state.Phase=$state.Status }
+        'Excluded' { $state.Status='CompletedWithExclusions'; $state.Phase=$state.Status; $state.Skipped=@([pscustomobject]@{Title='Driver dimostrativo'; Reason='Driver excluded by operator'}) }
+        'Error' { $state.Status='Blocked'; $state.Phase=$state.Status }
+        'Reboot' { $state.Status='WaitingForReboot'; $state.Phase='RestartCountdown'; $state.Message='Restart in 75 seconds. PREVIEW: no restart will occur.' }
+        'Committed' { $state.Status='WaitingForReboot'; $state.Phase='Restart'; $state.RebootCommitted=$true }
+        'Stopped' { $state.Status='Stopped'; $state.Phase=$state.Status }
+    }
+    if ($Scene -in @('Completed','Partial','Download','Install','Reboot','Committed','Resume','StopPending')) {
+        $state.Installed = @([pscustomobject]@{Title='Aggiornamento dimostrativo installato'})
+    }
+    if ($Scene -in @('Partial','Error')) {
+        $state.Failures = @([pscustomobject]@{Title='Aggiornamento dimostrativo'; Reason='Errore dimostrativo: Result=4; HRESULT=0x80004005'; Resolved=$false})
+    }
+    $log = "[PREVIEW] Solo dati dimostrativi. Nessuna scansione, installazione o riavvio reale.`r`n[INFO] Scenario: $Scene`r`n[INFO] $($state.Message)"
+    foreach ($failure in $state.Failures) { $log += "`r`n[ERROR] $($failure.Title): $($failure.Reason)" }
+    foreach ($excluded in $state.Skipped) { $log += "`r`n[INFO] EXCLUDED: $($excluded.Title): $($excluded.Reason)" }
+    return [pscustomobject]@{ State=$state; Log=$log; StopRequested=($Scene -eq 'StopPending'); PreviousBoot=$false }
+}
+
+function New-MonitorPreviewWindow {
+    # Reuse the production view, but never attach its reader, worker or stop command.
+    $window = New-MonitorWindow
+    $window.FindName('PreviewControls').Visibility = 'Visible'
+    $selector = $window.FindName('PreviewSelector')
+    $scenes = @(
+        @('Queued','In attesa'), @('Scan','Ricerca'), @('Download','Download'), @('Install','Installazione'),
+        @('Verify','Verifica'), @('Retry','Attesa nuovo tentativo'), @('Stale','Dati non recenti'),
+        @('Reboot','Riavvio: countdown'), @('Committed','Riavvio confermato'), @('Resume','Ripresa'),
+        @('StopPending','Stop richiesto'), @('Stopped','Interrotto'), @('NoUpdates','Nessun aggiornamento'),
+        @('Completed','Completato'), @('Partial','Parziale con errori'), @('Excluded','Con esclusioni'),
+        @('Error','Errore'), @('ActiveError','Blocco con operazione incerta')
+    )
+    for ($index=0; $index -lt $scenes.Count; $index++) {
+        $item = [Windows.Controls.ComboBoxItem]::new()
+        $item.Content = '{0:00} / {1}' -f ($index+1), $scenes[$index][1]
+        $item.Tag = $scenes[$index][0]
+        [void]$selector.Items.Add($item)
+    }
+    $selector.add_SelectionChanged({ param($sender, $eventArgs)
+        if ($null -eq $sender.SelectedItem) { return }
+        $target = [Windows.Window]::GetWindow($sender)
+        Stop-MonitorTransition $target
+        $target.Tag.ShowLog = $false
+        Update-MonitorView $target (New-MonitorPreviewSnapshot $sender.SelectedItem.Tag)
+        $target.FindName('PreviewPrevious').IsEnabled = $sender.SelectedIndex -gt 0
+        $target.FindName('PreviewNext').IsEnabled = $sender.SelectedIndex -lt $sender.Items.Count-1
+    })
+    $window.FindName('PreviewPrevious').add_Click({ param($sender, $eventArgs)
+        $selector = [Windows.Window]::GetWindow($sender).FindName('PreviewSelector')
+        if ($selector.SelectedIndex -gt 0) { $selector.SelectedIndex-- }
+    })
+    $window.FindName('PreviewNext').add_Click({ param($sender, $eventArgs)
+        $selector = [Windows.Window]::GetWindow($sender).FindName('PreviewSelector')
+        if ($selector.SelectedIndex -lt $selector.Items.Count-1) { $selector.SelectedIndex++ }
+    })
+    $window.FindName('PreviewIntro').add_Click({ param($sender, $eventArgs)
+        Start-MonitorTransition ([Windows.Window]::GetWindow($sender)) 'GhostAttack'
+    })
+    $window.FindName('StopButton').ToolTip = 'Simula la richiesta di stop; scegli Interrotto per vedere la conferma.'
+    $window.FindName('StopButton').add_Click({ param($sender, $eventArgs)
+        $selector = [Windows.Window]::GetWindow($sender).FindName('PreviewSelector')
+        $selector.SelectedItem = @($selector.Items | Where-Object { $_.Tag -eq 'StopPending' })[0]
+    })
+    $window.FindName('CloseButton').add_Click({ param($sender, $eventArgs)
+        [Windows.Window]::GetWindow($sender).Close()
+    })
+    $selector.SelectedIndex = 3
+    return $window
+}
+
+function Invoke-MonitorPreview {
+    if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
+        throw 'The preview requires an interactive Windows desktop.'
+    }
+    $window = New-MonitorPreviewWindow
+    $timer = [Windows.Threading.DispatcherTimer]::new()
+    $timer.Interval = [TimeSpan]::FromMilliseconds(250)
+    # Keep samples static while allowing the real log reveal and native animations.
+    $timer.add_Tick({ Update-MonitorLog $window; Set-MonitorAmbientAnimation $window; Set-MonitorOutcomePulse $window })
+    $window.add_Closed({ $timer.Stop() })
+    try { $timer.Start(); [void]$window.ShowDialog() }
+    finally { $timer.Stop(); $window.Close() }
+}
+
 function Invoke-Monitor {
     Assert-Administrator
     if (-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) {
@@ -2948,7 +3312,7 @@ function Invoke-Monitor {
     $runId = $initial.RunId
     if ($MonitorRunId -and $MonitorRunId -ne $runId) { $window.Close(); return }
     $script:MonitorRunId = $runId
-    $mutex = [Threading.Mutex]::new($false, ('Local\MSP-WindowsUpdate-Monitor-' + $runId))
+    $mutex = [Threading.Mutex]::new($false, ('Local\DaScript-WindowsUpdate-Monitor-' + $runId))
     $owned = $false
     $reader = $null
     $timer = $null
@@ -2996,6 +3360,8 @@ function Invoke-Monitor {
                 Stop-MonitorTransition $window
                 $window.Tag.ShowLog = $true
                 Set-MonitorScene $window
+                $window.Title = 'Update - Errore monitor'
+                $window.FindName('ActivityLog').IsExpanded = $true
                 $window.FindName('Activity').Tag = $null
                 $window.FindName('PhaseText').Text = 'READ / COMMAND FAILED'
                 $window.FindName('PhaseText').Foreground = $window.Resources['Error']
@@ -3010,7 +3376,7 @@ function Invoke-Monitor {
                 $window.FindName('ProgressCaption').Text = 'STATUS UNAVAILABLE'
                 $window.FindName('WorkerText').Text = 'WORKER DATA UNAVAILABLE'
                 $window.FindName('WuaResponseText').Text = 'MONITOR READ FAILED // NO CURRENT DATA'
-                $window.FindName('UpdateProgressText').Text = 'UPDATE --'
+                Set-MonitorUpdateTitle $window 'UPDATE --'
                 $window.FindName('CurrentUpdateText').Text = 'UPDATE --'
                 $window.FindName('TimingText').Text = 'ELAPSED -- // LAST CHANGE --'
                 $window.FindName('DownloadText').Visibility = 'Collapsed'
@@ -3062,6 +3428,7 @@ try {
         'Worker'  { Invoke-Worker }
         'Status'  { Show-Status }
         'Monitor' { Invoke-Monitor }
+        'Preview' { Invoke-MonitorPreview }
         'Stop'    { Invoke-Stop }
     }
 } finally { Close-MemoryLog }

@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $tokens = $null
 $errors = $null
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 $function = $ast.Find({ param($node)

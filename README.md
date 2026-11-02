@@ -1,6 +1,14 @@
 # DaScript
 
-## Avvio rapido — DaScript Windows Update
+Per rivedere l'interfaccia dello script di aggiornamento, senza avviare aggiornamenti o riavvii, aprire [Anteprima.bat](windows/windows-update/Anteprima.bat) oppure eseguire dalla radice del repository:
+
+```powershell
+.\windows\windows-update\Anteprima.bat
+```
+
+La finestra consente di navigare tra le schermate con dati dimostrativi. Vedere [anteprima e avvio operativo](windows/windows-update/README.md).
+
+## Avvio rapido — aggiornamenti Windows
 
 Aprire **Windows PowerShell 5.1 come amministratore** ed eseguire:
 
@@ -18,7 +26,7 @@ Dopo l'avvio riuscito con il comando sopra, la sessione PowerShell interattiva s
 
 | Script | Funzione | Stato |
 | --- | --- | --- |
-| [DaScript Windows Update](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prima versione |
+| [Aggiornamenti Windows](windows/windows-update/README.md) | Cerca, installa e verifica aggiornamenti Windows; gestisce riavvii e ripresa automatica | Prima versione |
 
 ## Piattaforme
 

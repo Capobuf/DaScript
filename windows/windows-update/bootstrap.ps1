@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 # Follow the latest worker published on main at each new launch.
-$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/MSP-WindowsUpdate.ps1'
+$workerUrl = 'https://raw.githubusercontent.com/Capobuf/DaScript/main/windows/windows-update/WindowsUpdate.ps1'
 
 $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

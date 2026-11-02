@@ -2,7 +2,7 @@
 param([switch]$ReadOnlyChild, [string]$LogPrefix, [string]$RunId, [string]$LockName)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)

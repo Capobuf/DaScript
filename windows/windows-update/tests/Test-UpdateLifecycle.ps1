@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 Import-Module ScheduledTasks -ErrorAction Stop
 $tokens = $null
 $errors = $null
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 # Define functions only. WUA, task registration and the main entry point are never executed.
@@ -110,7 +110,7 @@ function New-TestJob {
 }
 try {
     Initialize-WuaCallback
-    $callback = New-Object MSPWindowsUpdate.Callback
+    $callback = New-Object DaScript.WindowsUpdate.Callback
     $dispatch = [Runtime.InteropServices.Marshal]::GetIDispatchForObject($callback)
     try { Assert-True ($dispatch -ne [IntPtr]::Zero) 'Callback has no IDispatch interface.' }
     finally { [void][Runtime.InteropServices.Marshal]::Release($dispatch) }
@@ -360,7 +360,7 @@ try {
     $state.Status = 'CompletedWithExclusions'
     $state.ParentCreated = $true
     Save-State $state
-    [IO.File]::WriteAllText((Join-Path $script:Root 'MSP-WindowsUpdate.ps1'), 'test worker')
+    [IO.File]::WriteAllText((Join-Path $script:Root 'WindowsUpdate.ps1'), 'test worker')
     [IO.File]::WriteAllText($script:ResultReadPath, $state.RunId)
     $script:failCleanup = $true
     Remove-RunArtifacts $state -WarningAction SilentlyContinue
@@ -411,27 +411,28 @@ try {
     $script:sleepHook = { $script:monitorWaits++ }
     Invoke-Worker
     Assert-True ($script:monitorWaits -eq 10 -and -not (Test-Path -LiteralPath $script:Root)) 'An absent monitor prevented bounded automatic cleanup.'
-    # Exercise the real startup guard before it can create a directory or replace tasks.
-    # AST-loaded functions have no source path; supply the existing test worker path.
-    Set-Item Function:Invoke-Start ([scriptblock]::Create((Get-Item Function:Invoke-Start).Definition.Replace('$PSCommandPath', '$script:WorkerPath')))
-    function Get-SupportedPlatform { return [pscustomobject]@{ IsServer=$false } }
-    function Test-UwfEnabled { return $false }
-    function Initialize-Directory { throw 'Test reached directory initialization.' }
-    $NoMonitor = $true
-    $legacyRoot = Join-Path $testBase 'MSPTools\WindowsUpdate'
-    [void][IO.Directory]::CreateDirectory($legacyRoot)
-    foreach ($name in @('state.json', 'state.json.bak')) {
-        $path = Join-Path $legacyRoot $name
-        [IO.File]::WriteAllText($path, 'unreadable previous state')
+    # Previous task identities must not survive a rename unnoticed.
+    function Get-ScheduledTask { param($TaskPath, $ErrorAction) return $script:previousTasks }
+    foreach ($actionName in @('Worker','Monitor')) {
+        $script:previousTasks = @([pscustomobject]@{
+            TaskName='Previous-update-task'; Actions=@([pscustomobject]@{Arguments=('-File "C:\ProgramData\Previous\WindowsUpdate\OldWorker.ps1" -Action ' + $actionName)})
+        })
         $message = ''
-        try { Invoke-Start } catch { $message = $_.Exception.Message }
-        Assert-True ($message -like 'Previous runtime state found*') ('Startup ignored previous runtime state: ' + $message)
-        Assert-True ([IO.File]::ReadAllText($path) -eq 'unreadable previous state') 'Startup modified previous runtime state.'
-        [IO.File]::Delete($path)
+        try { Assert-NoPreviousUpdateRuntime } catch { $message = $_.Exception.Message }
+        Assert-True ($message -like 'Previous update task found:*') ('Startup ignored previous task: ' + $message)
     }
-    $message = ''
-    try { Invoke-Start } catch { $message = $_.Exception.Message }
-    Assert-True ($message -eq 'Test reached directory initialization.') 'An empty legacy directory prevented startup.'
+    $script:previousTasks = @([pscustomobject]@{TaskName='Unrelated task'; Actions=@([pscustomobject]@{ClassId='example'})})
+    Assert-NoPreviousUpdateRuntime
+    $script:checks++
+    $script:previousTasks = @()
+    [void][IO.Directory]::CreateDirectory($script:Root)
+    $previousWorker = Join-Path $script:Root 'OldWorker.ps1'
+    [IO.File]::WriteAllText($previousWorker, 'preserve previous worker')
+    Assert-Throws { Assert-NoPreviousUpdateRuntime }
+    Assert-True ([IO.File]::ReadAllText($previousWorker) -eq 'preserve previous worker') 'Previous worker was changed.'
+    [IO.File]::Delete($previousWorker)
+    Assert-NoPreviousUpdateRuntime
+    $script:checks++
     Write-Output ("PASS: $script:checks lifecycle checks (synthetic jobs; native task definitions, temporary state/locks; no updates, restarts, registered tasks or audio).")
 } finally {
     Close-MemoryLog

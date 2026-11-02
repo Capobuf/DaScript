@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Load only selection functions; never execute the script's Start/Worker entry points.
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)

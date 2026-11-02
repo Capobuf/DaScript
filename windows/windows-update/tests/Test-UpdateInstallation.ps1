@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Load only the tested functions; never execute Start/Worker or create real WUA objects.
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
@@ -34,7 +34,7 @@ function Write-Log {
 function New-Object {
     param([string]$TypeName, [string]$ComObject)
     if ($ComObject -eq 'Microsoft.Update.UpdateColl') { return ,([Collections.ArrayList]::new()) }
-    if ($TypeName -eq 'MSPWindowsUpdate.Callback') { return [pscustomobject]@{} }
+    if ($TypeName -eq 'DaScript.WindowsUpdate.Callback') { return [pscustomobject]@{} }
     throw 'Unexpected object creation in test.'
 }
 function New-TestUpdate {

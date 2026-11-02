@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Run this test with powershell.exe -STA.' }
 $tokens = $null
 $errors = $null
-$source = Join-Path $PSScriptRoot '..\MSP-WindowsUpdate.ps1'
+$source = Join-Path $PSScriptRoot '..\WindowsUpdate.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 # Load definitions only. Never execute Start, Worker, WUA, shutdown or real task operations.
@@ -105,7 +105,7 @@ function Test-MonitorTransitions {
     $Window.Show()
     $Window.UpdateLayout()
     Assert-True ($Window.FindName('IntroLayer').Visibility -eq 'Collapsed' -and $Window.FindName('Scene').Opacity -eq 1) 'Static fallback hid the view.'
-    Assert-True ($Window.AllowsTransparency -and $Window.Background.Color.A -eq 0 -and $Window.FindName('WindowSurface').Background.Color.A -eq 255) 'Static fallback lost its opaque operational surface.'
+    Assert-True ($Window.AllowsTransparency -and $Window.Background.Color.A -eq 0 -and $Window.FindName('WindowSurface').Background.Color.A -eq 0 -and $Window.FindName('GhostBackplate').Fill.Color.A -eq 255) 'Static fallback lost its opaque operational surface.'
     foreach ($name in @('GhostAttack')) {
         $storyboard = $Window.Resources[$name]
         $storyboard.Begin($Window, $true)
@@ -196,10 +196,10 @@ function Test-MonitorTransitions {
             }
             $Window.Tag.Storyboard.Resume($Window)
             Wait-MonitorTransition $Window
-            Assert-True ($null -eq $Window.Tag.WindowPlacement -and $Window.WindowState -eq 'Normal' -and $Window.ResizeMode -eq 'CanResize') "$name did not restore the window at real timeline completion: state=$($Window.WindowState); resize=$($Window.ResizeMode); saved=$($Window.Tag.WindowPlacement)."
+            Assert-True ($null -eq $Window.Tag.WindowPlacement -and $Window.WindowState -eq 'Normal' -and $Window.ResizeMode -eq 'CanMinimize') "$name did not restore the window at real timeline completion: state=$($Window.WindowState); resize=$($Window.ResizeMode); saved=$($Window.Tag.WindowPlacement)."
             Assert-True ([Math]::Abs($Window.Left-$bounds.Left) -lt 1 -and [Math]::Abs($Window.Top-$bounds.Top) -lt 1 -and [Math]::Abs($Window.Width-$bounds.Width) -lt 1 -and [Math]::Abs($Window.Height-$bounds.Height) -lt 1) "$name lost the original position or dimensions."
             Assert-True ($Window.FindName('ChromeControls').Visibility -eq 'Visible' -and $null -ne [Windows.Shell.WindowChrome]::GetWindowChrome($Window)) "$name did not restore native window controls."
-            Assert-True ($Window.FindName('WindowSurface').Background -eq $Window.Tag.SceneBackground -and $Window.FindName('WindowSurface').Background.Color.A -eq 255) "$name did not restore the latest outcome background."
+            Assert-True ($Window.FindName('GhostBackplate').Fill -eq $Window.Tag.SceneBackground -and $Window.FindName('WindowSurface').Background.Color.A -eq 0 -and $Window.FindName('GhostBackplate').Fill.Color.A -eq 255) "$name did not restore the latest outcome background."
             Assert-True ($Window.FindName('DimLayer').Visibility -eq 'Collapsed' -and [double]::IsNaN($Window.FindName('WindowSurface').Width) -and $Window.FindName('WindowSurface').Opacity -eq 1) "$name left a vignette or fixed-size/faded app after completion."
         }
         $Window.WindowState = 'Maximized'
@@ -241,7 +241,7 @@ function Test-MonitorTransitions {
         $pulse.Interval = [TimeSpan]::FromMilliseconds(1000)
         $pulse.add_Tick({ $pulse.Stop(); $frame.Continue = $false })
         try { $pulse.Start(); [Windows.Threading.Dispatcher]::PushFrame($frame) } finally { $pulse.Stop() }
-        Assert-True ($background.Color -eq $Window.Tag.AlternateColor -and $Window.FindName('WindowSurface').Background -eq $background) 'Native color clock did not alternate the result background.'
+        Assert-True ($background.Color -eq $Window.Tag.AlternateColor -and $Window.FindName('GhostBackplate').Fill -eq $background) 'Native color clock did not alternate the result background.'
         Assert-True (-not $ink.HasAnimatedProperties -and $ink.Color -eq $originalInk -and $Window.FindName('OutcomeGhost').Fill -eq $ink) 'Background pulse also changed the logo or title.'
         $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
         Assert-True (-not $Window.Tag.Pulse -and -not $background.HasAnimatedProperties) 'Result colors kept animating while reading the log.'
@@ -338,14 +338,14 @@ try {
     Assert-True ($logo.IsFrozen -and $logo.Bounds.Width -eq 1180 -and $logo.Bounds.Height -eq 964) 'Embedded vector logo is missing or invalid.'
     $snapshot = [pscustomobject]@{State=$state; Log='Synthetic log'; StopRequested=$false}
     Update-MonitorView $window $snapshot
-    Assert-True ($window.FindName('UpdateProgressText').Text -eq 'UPDATE 21%' -and $window.FindName('CurrentUpdateText').Text -like 'UPDATE 3/8*') 'Current update percentage or batch position is missing.'
+    Assert-True ($window.FindName('UpdateProgressText').Content -eq 'UPDATE 21%' -and $window.FindName('CurrentUpdateText').Text -like 'UPDATE 3/8*') 'Current update percentage or batch position is missing.'
     Assert-True ($window.FindName('WuaResponseText').Text -eq 'NO PROGRESS CHANGE // WINDOWS UPDATE STILL RESPONDING') 'Responsive but unchanged progress was misclassified.'
     Assert-True ($window.FindName('WorkerText').Text -like 'WORKER ACTIVE*' -and $window.FindName('TimingText').Text -like 'ELAPSED 00:10:*LAST CHANGE 00:03:*') 'Independent heartbeat or operation timers are missing.'
     Assert-True (-not $window.FindName('Diagnostics').IsExpanded -and $window.FindName('DiagnosticsText').Text -like '*WUA last response UTC:*') 'Diagnostics is not available on demand.'
     foreach ($invalid in @($null, '', -1, 101, 'NaN', 'bad', 0.5)) {
         $state.WuaProgress.UpdatePercent = $invalid
         Update-MonitorView $window $snapshot
-        Assert-True ($window.FindName('UpdateProgressText').Text -eq 'UPDATE --') 'Invalid current update percentage was displayed.'
+        Assert-True ($window.FindName('UpdateProgressText').Content -eq 'UPDATE --') 'Invalid current update percentage was displayed.'
     }
     $state.WuaProgress.UpdatePercent = 21
     $now = [DateTime]::UtcNow
