@@ -25,6 +25,41 @@ function Click-Button {
     param($Button)
     $Button.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
 }
+function Click-Expander {
+    param($Expander)
+    [void]$Expander.ApplyTemplate()
+    $toggle = $Expander.Template.FindName('HeaderToggle', $Expander)
+    # Exercise OnToggle and the routed Click event, without desktop input automation.
+    $method = [Windows.Controls.Primitives.ToggleButton].GetMethod('OnClick', [Reflection.BindingFlags]'Instance,NonPublic')
+    $null = $method.Invoke($toggle, @())
+    $owner = [Windows.Window]::GetWindow($Expander)
+    $owner.UpdateLayout()
+    Assert-True ($owner.WindowState -eq 'Normal' -and $owner.IsVisible) 'Expander activation minimized or hid the window.'
+}
+function Test-HeaderHitSurface {
+    param($Window)
+    $Window.UpdateLayout()
+    $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$Window.ActualWidth, [int]$Window.ActualHeight, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+    $bitmap.Render($Window.Content)
+    $pixel = [byte[]]::new(4)
+    foreach ($name in @('ActivityLog','Diagnostics')) {
+        $expander = $Window.FindName($name)
+        $toggle = $expander.Template.FindName('HeaderToggle', $expander)
+        foreach ($point in @(
+            [Windows.Point]::new(5, $toggle.ActualHeight/2)
+            [Windows.Point]::new($toggle.ActualWidth-5, $toggle.ActualHeight/2)
+            [Windows.Point]::new($toggle.ActualWidth/2, 3)
+            [Windows.Point]::new($toggle.ActualWidth/2, $toggle.ActualHeight-3)
+        )) {
+            $position = $toggle.TranslatePoint($point, $Window.Content)
+            $bitmap.CopyPixels([Windows.Int32Rect]::new([int]$position.X,[int]$position.Y,1,1), $pixel, 4, 0)
+            Assert-True ($pixel[3] -gt 0) "$name lets native mouse input pass through its header padding."
+            $hit = $Window.InputHitTest($position)
+            while ($null -ne $hit -and $hit -ne $toggle) { $hit = [Windows.Media.VisualTreeHelper]::GetParent($hit) }
+            Assert-True ($hit -eq $toggle) "$name header padding routes input to a different control."
+        }
+    }
+}
 function Wait-AnimationTick {
     # Storyboard.Remove releases animated values on the next WPF timing tick.
     $frame = [Windows.Threading.DispatcherFrame]::new()
@@ -64,6 +99,7 @@ try {
     $window.Tag.Motion = $false
     $window.Show()
     Test-FrameRendering $window
+    Test-HeaderHitSurface $window
     $selector = $window.FindName('PreviewSelector')
     Assert-True ($selector.Items.Count -eq 18 -and $selector.SelectedItem.Tag -eq 'Install') 'Preview did not start on installation.'
     Assert-True ($window.FindName('PreviewControls').Visibility -eq 'Visible') 'Preview identification is missing.'
@@ -75,19 +111,20 @@ try {
     $toggle = $activity.Template.FindName('HeaderToggle', $activity)
     Assert-True ($toggle.Content -eq 'ACTIVITY') 'Activity reused the Diagnostics label.'
     $expandedHeight = $window.ActualHeight
-    $toggle.IsChecked = $false
+    Click-Expander $activity
     $window.UpdateLayout()
     Assert-True (-not $activity.IsExpanded -and $activity.Template.FindName('Details', $activity).Visibility -eq 'Collapsed') 'Activity toggle did not collapse its log.'
     $collapsedHeight = $window.ActualHeight
     Assert-True ($collapsedHeight -lt $expandedHeight) 'Collapsing Activity did not remove the window extension.'
-    $window.FindName('Diagnostics').IsExpanded = $true
+    Click-Expander $window.FindName('Diagnostics')
     $window.UpdateLayout()
     Assert-True ($window.ActualHeight -gt $collapsedHeight -and $window.ActualHeight -le $window.MaxHeight) 'Diagnostics did not extend the window within the available work area.'
-    $window.FindName('Diagnostics').IsExpanded = $false
-    $toggle.IsChecked = $true
+    Click-Expander $window.FindName('Diagnostics')
+    Click-Expander $activity
     $window.UpdateLayout()
     Assert-True ([Math]::Abs($window.ActualHeight-$expandedHeight) -lt 1) 'Reopening Activity did not restore the extension height.'
     Assert-True $activity.IsExpanded 'Activity toggle did not reopen its log.'
+    Test-HeaderHitSurface $window
     $expected = @{NoUpdates='NoUpdates'; Completed='Completed'; Partial='Partial'; Excluded='Partial'; Error='Error'; Reboot='Reboot'; Committed='Reboot'; Stopped='Stopped'}
     for ($index=0; $index -lt $selector.Items.Count; $index++) {
         $selector.SelectedIndex = $index

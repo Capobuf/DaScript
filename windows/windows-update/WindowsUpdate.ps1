@@ -2191,7 +2191,8 @@ function New-MonitorWindow {
                         FocusVisualStyle="{x:Null}"
                         AutomationProperties.Name="{Binding Header, RelativeSource={RelativeSource TemplatedParent}}">
             <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
-              <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="Transparent" Background="Transparent" Padding="12,5">
+              <!-- Nonzero alpha keeps native layered-window hit testing inside the header padding. -->
+              <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="#01000000" Background="#01000000" Padding="12,5">
                 <StackPanel Orientation="Horizontal"><TextBlock x:Name="Mark" Text="[+] "/><ContentPresenter/></StackPanel>
               </Border>
               <ControlTemplate.Triggers>
