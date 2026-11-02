@@ -106,24 +106,27 @@ try {
     Assert-True ($window.Icon -is [Windows.Media.DrawingImage] -and $window.Icon.IsFrozen -and $window.Icon.Drawing.Geometry -eq $window.FindName('LogoPath').Data) 'Window icon does not use the embedded ghost.'
     Assert-True ($window.Title -eq 'Update - Installazione - batch 42%') 'Initial window title does not describe the current operation.'
     $activity = $window.FindName('ActivityLog')
-    Assert-True ($activity.IsExpanded -and -not $window.FindName('Diagnostics').IsExpanded) 'Activity must open by default independently of Diagnostics.'
+    Assert-True (-not $activity.IsExpanded -and -not $window.FindName('Diagnostics').IsExpanded -and $window.OwnedWindows.Count -eq 0) 'Panels must start closed.'
     [void]$activity.ApplyTemplate()
     $toggle = $activity.Template.FindName('HeaderToggle', $activity)
     Assert-True ($toggle.Content -eq 'ACTIVITY') 'Activity reused the Diagnostics label.'
-    $expandedHeight = $window.ActualHeight
+    $initialHeight = $window.ActualHeight
     Click-Expander $activity
-    $window.UpdateLayout()
-    Assert-True (-not $activity.IsExpanded -and $activity.Template.FindName('Details', $activity).Visibility -eq 'Collapsed') 'Activity toggle did not collapse its log.'
-    $collapsedHeight = $window.ActualHeight
-    Assert-True ($collapsedHeight -lt $expandedHeight) 'Collapsing Activity did not remove the window extension.'
+    $panel = $window.Tag.Panels['ActivityLog']
+    Assert-True ($panel.IsVisible -and $panel.Owner -eq $window -and -not $panel.ShowInTaskbar -and $panel.ResizeMode -eq 'NoResize') 'Activity did not open an owned, fixed-size window.'
+    Assert-True ([Windows.Window]::GetWindow($window.FindName('LogText')) -eq $panel) 'The live log did not move to Activity.'
+    Update-MonitorLog $window -Immediate
+    Assert-True ($window.FindName('LogText').Text -like '*PREVIEW*') 'Detached Activity lost its live log.'
     Click-Expander $window.FindName('Diagnostics')
-    $window.UpdateLayout()
-    Assert-True ($window.ActualHeight -gt $collapsedHeight -and $window.ActualHeight -le $window.MaxHeight) 'Diagnostics did not extend the window within the available work area.'
+    Assert-True ($window.OwnedWindows.Count -eq 2 -and $window.Tag.Panels['Diagnostics'].IsVisible) 'Panels cannot open independently.'
+    Assert-True ([Math]::Abs($window.ActualHeight-$initialHeight) -lt 1) 'Opening panels resized the ghost.'
+    Click-Button $panel.FindName('PanelClose')
+    Assert-True (-not $activity.IsExpanded -and -not $window.Tag.Panels.ContainsKey('ActivityLog') -and $window.FindName('Diagnostics').IsExpanded) 'Panel close did not reset only its own toggle.'
     Click-Expander $window.FindName('Diagnostics')
     Click-Expander $activity
-    $window.UpdateLayout()
-    Assert-True ([Math]::Abs($window.ActualHeight-$expandedHeight) -lt 1) 'Reopening Activity did not restore the extension height.'
-    Assert-True $activity.IsExpanded 'Activity toggle did not reopen its log.'
+    Assert-True ($window.Tag.Panels['ActivityLog'].IsVisible -and [Windows.Window]::GetWindow($window.FindName('LogText')) -eq $window.Tag.Panels['ActivityLog']) 'Activity could not reopen the existing live content.'
+    Click-Expander $activity
+    Assert-True ($window.OwnedWindows.Count -eq 0 -and $window.ActualHeight -eq $initialHeight) 'Toggle close left a panel or resized the ghost.'
     Test-HeaderHitSurface $window
     $expected = @{NoUpdates='NoUpdates'; Completed='Completed'; Partial='Partial'; Excluded='Partial'; Error='Error'; Reboot='Reboot'; Committed='Reboot'; Stopped='Stopped'}
     for ($index=0; $index -lt $selector.Items.Count; $index++) {
@@ -169,6 +172,22 @@ try {
     $enabled = [Windows.SystemParameters]::ClientAreaAnimation -and -not [Windows.SystemParameters]::HighContrast -and ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
     Assert-True ($window.Tag.Ambient -eq $enabled) 'Ambient animation ignored native capability checks.'
     if ($enabled) {
+        Assert-True $window.Tag.Float.Timer.IsEnabled 'Floating timer did not start.'
+        $window.Tag.Float.Timer.Stop()
+        $window.Tag.Float.Phase = 0.0
+        $window.Tag.Float.Speed = 1.0
+        Update-MonitorFloat $window 0.033 $true
+        $firstSpeed = $window.Tag.Float.Speed
+        $firstPosition = $window.FindName('FloatOffset').Y
+        Assert-True ($firstSpeed -gt 0.8 -and $firstSpeed -lt 1 -and $firstPosition -gt 0 -and $firstPosition -lt 0.21) "Hover stopped or jumped abruptly: speed=$firstSpeed; y=$firstPosition."
+        for ($tick=0; $tick -lt 60; $tick++) { Update-MonitorFloat $window 0.033 $true }
+        $restPosition = $window.FindName('FloatOffset').Y
+        Assert-True ($window.Tag.Float.Speed -lt 0.001 -and $restPosition -gt $firstPosition) 'Hover did not gradually settle in place.'
+        Update-MonitorFloat $window 0.033 $false
+        Assert-True ($window.Tag.Float.Speed -gt 0 -and $window.Tag.Float.Speed -lt 0.2 -and [Math]::Abs($window.FindName('FloatOffset').Y-$restPosition) -lt 0.05) 'Mouse leave did not accelerate smoothly.'
+        Set-MonitorFloatAnimation $window
+        Wait-AnimationTick
+        Assert-True ($window.Tag.Float.Timer.IsEnabled -and $window.Tag.Float.Clock.IsRunning) 'Native floating timer failed to tick.'
         $ambient = $window.Resources['TerminalAmbient']
         $ambient.Pause($window)
         $ambient.SeekAlignedToLastTick($window, [TimeSpan]::FromMilliseconds(600), 'BeginTime')
@@ -182,17 +201,22 @@ try {
         Assert-True $window.Tag.Ambient 'Returning to operation did not restart ambient animation.'
         $window.WindowState = 'Minimized'
         Assert-True (-not $window.Tag.Ambient) 'Minimized window retained ambient animation.'
+        Assert-True (-not $window.Tag.Float.Timer.IsEnabled) 'Minimized window retained the floating timer.'
         $window.WindowState = 'Normal'
         Assert-True $window.Tag.Ambient 'Restoring the window did not restart ambient animation.'
+        Assert-True $window.Tag.Float.Timer.IsEnabled 'Restoring the window did not resume floating.'
         $window.Tag.Motion = $false
         Set-MonitorAmbientAnimation $window
         Wait-AnimationTick
         Assert-True (-not $window.Tag.Ambient -and $window.FindName('TextureOffset').Y -eq 0) 'Static fallback did not stop the texture.'
+        Assert-True (-not $window.Tag.Float.Timer.IsEnabled) 'Static fallback retained the floating timer.'
         $window.Tag.Motion = $true
         Set-MonitorAmbientAnimation $window
     }
     Click-Button $window.FindName('CloseButton')
     Assert-True (-not $window.IsVisible) 'Close did not close the preview.'
     Assert-True (-not $window.Tag.Ambient) 'Closed window retained ambient animation.'
+    Assert-True ($window.OwnedWindows.Count -eq 0 -and $window.Tag.Panels.Count -eq 0) 'Closing the ghost left orphan panels.'
+    Assert-True ($null -eq $window.Tag.Float.Timer -or -not $window.Tag.Float.Timer.IsEnabled) 'Closed window retained the floating timer.'
     Write-Output "PASS: $script:checks preview checks; real WPF controls/events, synthetic in-memory data, no worker or system changes."
 } finally { $window.Close() }

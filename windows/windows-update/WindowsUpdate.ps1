@@ -2055,37 +2055,125 @@ S3VDx2emsWDb/LVs652azK1+3MNWPcPeQWtyh84pxBtgwdpysHckl9R9zdE9sVbb+gZj6H/L/wFZ
     } finally { $reader.Dispose(); $zip.Dispose(); $inputStream.Dispose() }
 }
 
-function Update-MonitorFrame {
-    param([Windows.FrameworkElement]$Surface)
-    $width = $Surface.ActualWidth
-    $height = $Surface.ActualHeight
-    if ($width -lt 24 -or $height -lt 24) { return }
-    # Chamfer the attached panels without clipping the ghost or fullscreen intro.
-    $geometry = [Windows.Media.StreamGeometry]::new()
-    $context = $geometry.Open()
-    try {
-        $context.BeginFigure([Windows.Point]::new(12, 0), $true, $true)
-        $points = [Windows.Point[]]@(
-            [Windows.Point]::new($width-12, 0)
-            [Windows.Point]::new($width, 12)
-            [Windows.Point]::new($width, $height*0.3)
-            [Windows.Point]::new($width-6, $height*0.3+6)
-            [Windows.Point]::new($width-6, $height*0.7-6)
-            [Windows.Point]::new($width, $height*0.7)
-            [Windows.Point]::new($width, $height-12)
-            [Windows.Point]::new($width-12, $height)
-            [Windows.Point]::new(12, $height)
-            [Windows.Point]::new(0, $height-12)
-            [Windows.Point]::new(0, $height*0.7)
-            [Windows.Point]::new(6, $height*0.7-6)
-            [Windows.Point]::new(6, $height*0.3+6)
-            [Windows.Point]::new(0, $height*0.3)
-            [Windows.Point]::new(0, 12)
-        )
-        $context.PolyLineTo($points, $true, $false)
-    } finally { $context.Dispose() }
-    $geometry.Freeze()
-    $Surface.Clip = $geometry
+function Set-MonitorPanel {
+    param([object]$Window, [string]$Name)
+    $expander = $Window.FindName($Name)
+    if (-not $expander.IsExpanded) {
+        if ($Window.Tag.Panels.ContainsKey($Name)) { $Window.Tag.Panels[$Name].Close() }
+        return
+    }
+    if ($Window.Tag.Closing -or $Window.Tag.Panels.ContainsKey($Name)) { return }
+    [xml]$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="640" SizeToContent="Height" WindowStyle="None" ResizeMode="NoResize"
+        ShowInTaskbar="False" WindowStartupLocation="CenterOwner" Background="#B5A477"
+        Foreground="#FFF1BC" FontFamily="Consolas" FontSize="14" UseLayoutRounding="True">
+  <Border Background="#B5A477" BorderBrush="#111827" BorderThickness="1">
+    <Border BorderBrush="#F7E5AE" BorderThickness="2,2,0,0">
+      <Border BorderBrush="#574B30" BorderThickness="0,0,2,2" Padding="3">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/><RowDefinition Height="24"/></Grid.RowDefinitions>
+          <Grid x:Name="TitleBar" Background="#252B36">
+            <TextBlock x:Name="Caption" VerticalAlignment="Center" FontWeight="Bold" Margin="8,0,38,0"/>
+            <Button x:Name="PanelClose" Content="X" Width="24" Height="22" Margin="0,0,4,0" HorizontalAlignment="Right"
+                    Background="#B5A477" Foreground="#111827" FontWeight="Bold" ToolTip="Chiudi" AutomationProperties.Name="Chiudi finestra">
+              <Button.Template><ControlTemplate TargetType="Button">
+                <Border x:Name="Edge" Background="{TemplateBinding Background}" BorderBrush="#F7E5AE" BorderThickness="2,2,0,0">
+                  <Border x:Name="Inset" BorderBrush="#574B30" BorderThickness="0,0,2,2"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsPressed" Value="True"><Setter TargetName="Edge" Property="BorderBrush" Value="#574B30"/><Setter TargetName="Inset" Property="BorderBrush" Value="#F7E5AE"/></Trigger>
+                  <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Foreground" Value="#8C251F"/></Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate></Button.Template>
+            </Button>
+          </Grid>
+          <Border Grid.Row="1" Margin="0,4,0,4" BorderBrush="#574B30" BorderThickness="2,2,0,0">
+            <Border BorderBrush="#F7E5AE" BorderThickness="0,0,2,2" Background="#111827"><ContentControl x:Name="PanelBody"/></Border>
+          </Border>
+          <Border Grid.Row="2" BorderBrush="#574B30" BorderThickness="1" Padding="6,2">
+            <TextBlock Text="DaScript  /  UPDATE" Foreground="#24251F" FontSize="12"/>
+          </Border>
+        </Grid>
+      </Border>
+    </Border>
+  </Border>
+</Window>
+'@
+    $reader = [Xml.XmlNodeReader]::new($xaml)
+    try { $panel = [Windows.Markup.XamlReader]::Load($reader) }
+    finally { $reader.Dispose() }
+    $panel.Owner = $Window
+    $panel.Icon = $Window.Icon
+    $panel.Title = 'Update - ' + $expander.Header
+    $panel.FindName('Caption').Text = '[+] ' + $expander.Header
+    $panel.Width = [Math]::Min($panel.Width, [Windows.SystemParameters]::WorkArea.Width)
+    $panel.MaxHeight = [Windows.SystemParameters]::WorkArea.Height
+    # The content keeps its original namescope, so live telemetry updates both windows.
+    $panel.Resources = $Window.Resources
+    $panel.FindName('PanelBody').Content = $Window.Tag.PanelContent[$Name]
+    $panel.Tag = [pscustomobject]@{ Monitor=$Window; PanelName=$Name }
+    $panel.FindName('TitleBar').add_MouseLeftButtonDown({ param($sender, $eventArgs)
+        if ($eventArgs.LeftButton -eq 'Pressed') { [Windows.Window]::GetWindow($sender).DragMove(); $eventArgs.Handled = $true }
+    })
+    $panel.FindName('PanelClose').add_Click({ param($sender, $eventArgs) [Windows.Window]::GetWindow($sender).Close() })
+    $panel.add_PreviewKeyDown({ param($sender, $eventArgs)
+        if ($eventArgs.Key -eq 'Escape') { $sender.Close(); $eventArgs.Handled = $true }
+    })
+    $panel.add_Closed({ param($sender, $eventArgs)
+        $owner = $sender.Tag.Monitor
+        $name = $sender.Tag.PanelName
+        $sender.FindName('PanelBody').Content = $null
+        $owner.Tag.Panels.Remove($name)
+        $owner.FindName($name).IsExpanded = $false
+    })
+    $Window.Tag.Panels[$Name] = $panel
+    $panel.Show()
+}
+
+function Update-MonitorFloat {
+    param([object]$Window, [double]$Seconds, [bool]$Hover)
+    $motion = $Window.Tag.Float
+    $dt = [Math]::Max(0.0, [Math]::Min(0.1, $Seconds))
+    $target = if ($Hover) { 0.0 } else { 1.0 }
+    # Integrate exponential damping: hover changes velocity, never the current position.
+    $decay = [Math]::Exp(-$dt/0.22)
+    $motion.Phase += $target*$dt + ($motion.Speed-$target)*0.22*(1-$decay)
+    $motion.Speed = $target + ($motion.Speed-$target)*$decay
+    $offset = $Window.FindName('FloatOffset')
+    $offset.X = 2.5*[Math]::Sin($motion.Phase*2*[Math]::PI/9)
+    $offset.Y = 6*[Math]::Sin($motion.Phase*2*[Math]::PI/6)
+}
+
+function Set-MonitorFloatAnimation {
+    param([object]$Window, [switch]$Stop)
+    $enabled = -not $Stop -and $Window.IsLoaded -and -not $Window.Tag.Closing -and
+        $Window.WindowState -ne 'Minimized' -and $null -eq $Window.Tag.Storyboard -and
+        $null -eq $Window.Tag.WindowPlacement -and $Window.Tag.Motion -and
+        [Windows.SystemParameters]::ClientAreaAnimation -and -not [Windows.SystemParameters]::HighContrast -and
+        ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
+    $motion = $Window.Tag.Float
+    if (-not $enabled) {
+        if ($null -ne $motion.Timer) { $motion.Timer.Stop() }
+        $motion.Clock.Reset()
+        return
+    }
+    if ($null -eq $motion.Timer) {
+        $motion.Timer = [Windows.Threading.DispatcherTimer]::new([Windows.Threading.DispatcherPriority]::Background)
+        $motion.Timer.Interval = [TimeSpan]::FromMilliseconds(33)
+        $targetWindow = $Window
+        $advance = ${function:Update-MonitorFloat}
+        $motion.Timer.add_Tick({
+            $state = $targetWindow.Tag.Float
+            $seconds = $state.Clock.Elapsed.TotalSeconds
+            $state.Clock.Restart()
+            $hover = $targetWindow.IsMouseOver -or $state.Dragging
+            foreach ($panel in $targetWindow.Tag.Panels.Values) { $hover = $hover -or $panel.IsMouseOver }
+            & $advance $targetWindow $seconds $hover
+        }.GetNewClosure())
+    }
+    if (-not $motion.Timer.IsEnabled) { $motion.Clock.Restart(); $motion.Timer.Start() }
 }
 
 function New-MonitorWindow {
@@ -2180,7 +2268,7 @@ function New-MonitorWindow {
       <DrawingBrush.Drawing><GeometryDrawing Brush="#A78A37" Geometry="M 0,0 L 3,0 8,5 8,8 Z M 0,5 L 3,8 0,8 Z"/></DrawingBrush.Drawing>
     </DrawingBrush>
     <Style x:Key="Technical" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="14"/><Setter Property="Foreground" Value="{StaticResource Muted}"/>
     </Style>
     <Style TargetType="Expander">
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Expander">
@@ -2302,7 +2390,8 @@ function New-MonitorWindow {
   <Border x:Name="DimLayer" Background="{StaticResource DimBackdrop}" Visibility="Collapsed" IsHitTestVisible="False"/>
   <Border x:Name="WindowSurface" Background="Transparent">
     <ScrollViewer x:Name="ShellScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Grid x:Name="Scene">
+      <Grid x:Name="Scene" Margin="8,12">
+        <Grid.RenderTransform><TranslateTransform x:Name="FloatOffset"/></Grid.RenderTransform>
         <Grid.RowDefinitions><RowDefinition x:Name="ChromeRow" Height="0"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <Viewbox x:Name="GhostView" Grid.Row="1" Height="500" Stretch="Uniform" HorizontalAlignment="Center">
           <Grid Width="700" Height="572">
@@ -2322,28 +2411,34 @@ function New-MonitorWindow {
           <Button x:Name="CloseButton" Style="{StaticResource IconButton}" Tag="{StaticResource CloseIcon}" Content="_Chiudi" ToolTip="Alt+C: chiude la finestra; il lavoro attivo continua in background."/>
         </WrapPanel>
             </StackPanel>
-            <Ellipse x:Name="UpdateShade" Width="430" Height="240" Opacity="0.35" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,205,0,0" Fill="{StaticResource TextShade}" IsHitTestVisible="False"/>
-            <Grid Width="384" Height="190" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,238,0,0">
+            <Grid Width="470" Height="220" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,236,0,0">
               <Border x:Name="UpdateCard" Background="Transparent" Padding="8,10">
                 <Grid>
                   <StackPanel x:Name="OperationalView">
 
-                    <ContentControl x:Name="UpdateProgressText" Margin="0,0,0,4" Focusable="False" Effect="{StaticResource LetterContrast}"
+                    <ContentControl x:Name="UpdateProgressText" Margin="0,0,0,4" Focusable="False"
                                     AutomationProperties.Name="{Binding Content, RelativeSource={RelativeSource Self}}">
                       <ContentControl.Template><ControlTemplate TargetType="ContentControl">
-                        <Viewbox Height="64" Stretch="Uniform">
-                          <Path Data="{TemplateBinding Tag}" Fill="{StaticResource Ink}"/>
+                        <Viewbox Height="96" Stretch="Uniform">
+                          <Grid Margin="2">
+                            <Path Data="{TemplateBinding Tag}" Fill="#0B1019" Stroke="#0B1019" StrokeThickness="3" StrokeLineJoin="Miter"/>
+                            <Path Data="{TemplateBinding Tag}" Fill="#FFF1BC"/>
+                          </Grid>
                         </Viewbox>
                       </ControlTemplate></ContentControl.Template>
                     </ContentControl>
 
 
-            <Grid Height="7" Width="320" HorizontalAlignment="Center" Margin="0,16,0,10">
+            <Grid Height="10" Width="370" HorizontalAlignment="Center" Margin="0,8,0,8">
               <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" AutomationProperties.Name="WUA batch progress"/>
             </Grid>
+                    <Viewbox Height="24" Stretch="Uniform" Margin="0,2,0,4"><Grid Margin="2">
+                      <Path Data="{Binding Data, ElementName=UpdatePercent}" Stroke="#0B1019" StrokeThickness="3"/>
+                      <Path x:Name="UpdatePercent" Fill="#FFF1BC"/>
+                    </Grid></Viewbox>
 
-                    <WrapPanel HorizontalAlignment="Center" Margin="0,10,0,6" TextElement.FontSize="18" TextElement.FontWeight="Bold" TextElement.Foreground="{StaticResource IconInk}" Effect="{StaticResource LetterContrast}">
-              <WrapPanel.Resources><Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/></Style></WrapPanel.Resources>
+                    <WrapPanel HorizontalAlignment="Center" Margin="0,10,0,6" TextElement.FontSize="24" TextElement.FontWeight="Bold" TextElement.Foreground="{StaticResource IconInk}" Effect="{StaticResource LetterContrast}">
+              <WrapPanel.Resources><Style TargetType="TextBlock"><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Background" Value="#111827"/><Setter Property="Padding" Value="3,0"/></Style></WrapPanel.Resources>
               <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
                 <ContentControl Content="{StaticResource InstalledIcon}" Style="{StaticResource PixelIcon}" Margin="0,0,8,0" ToolTip="Installati" AutomationProperties.Name="Installati"/>
                 <TextBlock x:Name="InstalledCount" ToolTip="Installati" Text="--" Foreground="{StaticResource IconInk}"/>
@@ -2368,13 +2463,16 @@ function New-MonitorWindow {
             <Path.CacheMode><BitmapCache RenderAtScale="2"/></Path.CacheMode>
           </Path>
           <StackPanel x:Name="OutcomeMessage" Effect="{StaticResource LetterContrast}">
-            <Viewbox Stretch="Uniform" Height="38" Margin="0,0,0,10">
-              <Path x:Name="OutcomeTitle" Fill="#9DE6ED"/>
+            <Viewbox Stretch="Uniform" Height="70" Margin="0,0,0,10">
+              <Grid Margin="2">
+                <Path Data="{Binding Data, ElementName=OutcomeTitle}" Stroke="#0B1019" StrokeThickness="3"/>
+                <Path x:Name="OutcomeTitle" Fill="#9DE6ED"/>
+              </Grid>
             </Viewbox>
-            <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="15" Foreground="#EDF1FA"/>
-            <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="#B8C3D9" Margin="0,6,0,0"/>
+            <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="18" Foreground="#FFF1BC" Background="#111827" Padding="6,3" HorizontalAlignment="Center"/>
+            <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="16" Foreground="#EDF1FA" Background="#111827" Padding="6,2" HorizontalAlignment="Center" Margin="0,6,0,0"/>
             <TextBox x:Name="OutcomeDetail" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="76" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"
-                     Background="Transparent" Foreground="#CED5E5" BorderThickness="0" FontSize="12" AutomationProperties.Name="Dettaglio dell'esito"/>
+                     Background="#111827" Foreground="#EDF1FA" BorderThickness="0" FontSize="14" AutomationProperties.Name="Dettaglio dell'esito"/>
           </StackPanel>
         </StackPanel>
       </ScrollViewer>
@@ -2394,26 +2492,27 @@ function New-MonitorWindow {
           </LinearGradientBrush>
         </Rectangle.Fill></Rectangle>
             </Grid>
+            <Grid IsHitTestVisible="False" Clip="M 112,249 L 133,259 145,276 140,302 119,292 Z M 568,258 L 593,248 597,292 576,307 560,289 Z">
+              <Path Data="{Binding Data, ElementName=GhostBackplate}" Fill="{Binding Fill, ElementName=GhostBackplate}" Stretch="Fill"/>
+              <Path Data="{Binding Data, ElementName=LogoPath}" Fill="{Binding Fill, ElementName=LogoPath}" Stretch="Fill" Opacity="0.85"/>
+            </Grid>
           </Grid>
         </Viewbox>
         <StackPanel Grid.Row="2" Width="600" HorizontalAlignment="Center">
-          <Border Width="2" Height="10" Background="{StaticResource Rule}"/>
-          <Expander x:Name="ActivityLog" Header="ACTIVITY" IsExpanded="True" Foreground="{StaticResource Muted}" FontSize="14" ToolTip="Latest 60 lines">
+          <Expander x:Name="ActivityLog" Header="ACTIVITY" IsExpanded="False" Foreground="{StaticResource IconInk}" FontSize="16" ToolTip="Apri il log: ultime 60 righe">
             <Grid>
-              <Border x:Name="ActivityPanel" Background="{DynamicResource SceneSurface}" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="140" Margin="0">
+              <Border x:Name="ActivityPanel" Background="{DynamicResource SceneSurface}" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="240" Margin="0">
             <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
-                   FontSize="12" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
+                   FontSize="14" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
                    HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
           </Grid></Border>
-              <Path Data="{Binding Clip, ElementName=ActivityPanel}" Stroke="{StaticResource Rule}" StrokeThickness="1" IsHitTestVisible="False"/>
 
             </Grid>
           </Expander>
-          <Border Width="2" Height="6" Background="{StaticResource Rule}"/>
-          <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" IsExpanded="False" Foreground="{StaticResource Muted}" FontSize="14">
+          <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" IsExpanded="False" Foreground="{StaticResource IconInk}" FontSize="16">
             <Grid>
               <Border x:Name="DiagnosticsPanel" Background="{DynamicResource SceneSurface}" Padding="16,10">
-                <ScrollViewer MaxHeight="190" VerticalScrollBarVisibility="Auto">
+                <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
                   <StackPanel>
                     <WrapPanel  HorizontalAlignment="Center" TextElement.FontSize="10" Margin="0,2,0,4">
             <TextBlock Text="&gt; " Foreground="{StaticResource Muted}"/>
@@ -2447,7 +2546,6 @@ function New-MonitorWindow {
                   </StackPanel>
                 </ScrollViewer>
               </Border>
-              <Path Data="{Binding Clip, ElementName=DiagnosticsPanel}" Stroke="{StaticResource Rule}" StrokeThickness="1" IsHitTestVisible="False"/>
             </Grid>
           </Expander>
           <StackPanel x:Name="PreviewControls" Visibility="Collapsed" Margin="0,0,0,8" Background="{DynamicResource SceneSurface}">
@@ -2484,31 +2582,21 @@ function New-MonitorWindow {
     $window.Width = [Math]::Min($window.Width, $area.Width)
     $window.MaxHeight = $area.Height
     $window.FindName('GhostView').Height = [Math]::Min(500, [Math]::Max(300, $area.Height-120))
-    foreach ($name in @('ActivityPanel','DiagnosticsPanel')) {
-        $window.FindName($name).add_SizeChanged({ param($sender, $eventArgs)
-            Update-MonitorFrame $sender
-        })
-    }
     $window.FindName('GhostBackplate').add_MouseLeftButtonDown({ param($sender, $eventArgs)
         if ($eventArgs.LeftButton -eq 'Pressed') {
-            [Windows.Window]::GetWindow($sender).DragMove()
+            $target = [Windows.Window]::GetWindow($sender)
+            $target.Tag.Float.Dragging = $true
+            try { $target.DragMove() } finally { $target.Tag.Float.Dragging = $false }
             $eventArgs.Handled = $true
         }
     })
     foreach ($name in @('ActivityLog','Diagnostics')) {
-        $resize = { param($sender, $eventArgs)
+        $togglePanel = { param($sender, $eventArgs)
             $target = [Windows.Window]::GetWindow($sender)
-            if ($target.IsLoaded -and $null -eq $target.Tag.WindowPlacement -and $target.WindowState -eq 'Normal') {
-                $target.SizeToContent = 'Height'
-                $target.UpdateLayout()
-                $area = [Windows.SystemParameters]::WorkArea
-                if ($target.Top -ge $area.Top -and $target.Top -lt $area.Bottom) {
-                    $target.Top = [Math]::Max($area.Top, [Math]::Min($target.Top, $area.Bottom-$target.ActualHeight))
-                }
-            }
+            if ($null -ne $target -and $target.IsLoaded) { Set-MonitorPanel $target $sender.Name }
         }
-        $window.FindName($name).add_Expanded($resize)
-        $window.FindName($name).add_Collapsed($resize)
+        $window.FindName($name).add_Expanded($togglePanel)
+        $window.FindName($name).add_Collapsed($togglePanel)
     }
     $window.FindName('MinimizeButton').add_Click({ param($sender, $eventArgs)
         [Windows.SystemCommands]::MinimizeWindow([Windows.Window]::GetWindow($sender))
@@ -2536,6 +2624,12 @@ function New-MonitorWindow {
         AlternateColor=[Windows.Media.Colors]::White
         WindowPlacement=$null; Closing=$false; ChangingPlacement=$false
         SceneBackground=$window.Resources['SceneSurface'].Clone()
+        Panels=@{}; PanelContent=@{}
+        Float=[pscustomobject]@{ Timer=$null; Clock=[Diagnostics.Stopwatch]::new(); Phase=0.0; Speed=0.0; Dragging=$false }
+    }
+    foreach ($name in @('ActivityLog','Diagnostics')) {
+        $window.Tag.PanelContent[$name] = $window.FindName($name).Content
+        $window.FindName($name).Content = $null
     }
     $window.FindName('LogoHost').Tag = [pscustomobject]@{ Index=0L; Random=[Random]::new() }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
@@ -2554,6 +2648,7 @@ function New-MonitorWindow {
         }
         Set-MonitorOutcomePulse $sender
         Set-MonitorAmbientAnimation $sender
+        foreach ($name in @('ActivityLog','Diagnostics')) { Set-MonitorPanel $sender $name }
     })
     $window.add_StateChanged({ param($sender, $eventArgs)
         if (-not $sender.Tag.ChangingPlacement -and
@@ -2783,12 +2878,14 @@ function Set-MonitorUpdateTitle {
     param([object]$Window, [string]$Text)
     $title = $Window.FindName('UpdateProgressText')
     if ($title.Content -ceq $Text) { return }
-    $title.Tag = Get-MonitorPixelTitle $Text -Distressed
+    $title.Tag = Get-MonitorPixelTitle 'UPDATE' -Distressed
+    $Window.FindName('UpdatePercent').Data = Get-MonitorPixelTitle ($Text -replace '^UPDATE\s*','')
     $title.Content = $Text
 }
 
 function Set-MonitorAmbientAnimation {
     param([object]$Window, [switch]$Stop)
+    Set-MonitorFloatAnimation $Window -Stop:$Stop
     $enabled = -not $Stop -and -not $Window.Tag.Outcome -and -not $Window.Tag.ShowLog -and
         $Window.IsLoaded -and -not $Window.Tag.Closing -and $Window.WindowState -ne 'Minimized' -and
         $null -eq $Window.Tag.Storyboard -and $null -eq $Window.Tag.WindowPlacement -and
@@ -2832,9 +2929,7 @@ function Set-MonitorScene {
     $Window.FindName('AmbientField').Visibility = 'Visible'
     # Resource lookup may freeze brushes; keep the animated brush on the controls themselves.
     $Window.FindName('GhostBackplate').Fill = $Window.Tag.SceneBackground
-    foreach ($name in @('ActivityPanel','DiagnosticsPanel','ChromeControls')) {
-        $Window.FindName($name).Background = $Window.Tag.SceneBackground
-    }
+    $Window.FindName('ChromeControls').Background = $Window.Tag.SceneBackground
     $Window.FindName('LogoPath').Fill = $(if ($result) { $Window.FindName('OutcomeTitle').Fill } else { $Window.Resources['Accent'] })
     $Window.FindName('ResultLogButton').Visibility = $(if ($result) { 'Visible' } else { 'Collapsed' })
     $Window.FindName('ResultLogButton').Content = $(if ($Window.Tag.ShowLog) { 'Torna all''_esito' } else { 'Visualizza _log' })
