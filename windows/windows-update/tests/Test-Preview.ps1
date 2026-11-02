@@ -111,6 +111,8 @@ try {
     Click-Button $title
     $panel = $window.Tag.Panels['Details']
     Assert-True ($panel.IsVisible -and $panel.Owner -eq $window -and -not $panel.ShowInTaskbar -and $panel.ResizeMode -eq 'NoResize') 'Title did not open the details panel.'
+    Assert-True ($panel.FindName('Caption').Data.IsFrozen -and $activity.Tag.IsFrozen -and $window.FindName('Diagnostics').Tag.IsFrozen) 'Terminal headings lost their embedded pixel lettering.'
+    Assert-True (-not $panel.Tag.Animated -and $panel.FindName('PanelSweep').Visibility -eq 'Collapsed') 'Static preview started panel animations.'
     foreach ($name in @('LogText','DiagnosticsText','ResultDetails','StopButton')) {
         Assert-True ([Windows.Window]::GetWindow($window.FindName($name)) -eq $panel) "$name is outside the unified panel."
     }
@@ -229,7 +231,27 @@ try {
         Set-MonitorAmbientAnimation $window
     }
     Click-Button $window.FindName('ResultLogButton')
+    $panel = $window.Tag.Panels['Details']
+    Assert-True ($panel.Tag.Animated -eq $enabled) 'Panel animation ignored native capability checks.'
+    if ($enabled) {
+        $content = $window.FindName('ResultDetails').Text
+        $clock = $panel.Resources['PanelTerminal']
+        $clock.Pause($panel)
+        $clock.SeekAlignedToLastTick($panel, [TimeSpan]::FromMilliseconds(800), 'BeginTime')
+        Assert-True ($panel.FindName('PanelScanOffset').Y -gt -0.15 -and $panel.FindName('PanelTextureOffset').Y -gt 0 -and $panel.FindName('PanelCursor').Opacity -eq 0.2) 'Native panel clocks did not advance the sweep, texture and cursor.'
+        Assert-True ($window.FindName('ResultDetails').Text -ceq $content -and -not $panel.FindName('PanelSweep').IsHitTestVisible) 'Decoration changed the result or intercepted input.'
+        $window.WindowState = 'Minimized'
+        Assert-True (-not $panel.Tag.Animated) 'Minimization left panel clocks running.'
+        $window.WindowState = 'Normal'
+        Assert-True $panel.Tag.Animated 'Restoring the ghost did not resume panel decoration.'
+        $window.Tag.Motion = $false
+        Set-MonitorAmbientAnimation $window
+        Assert-True (-not $panel.Tag.Animated) 'Static fallback retained panel clocks.'
+        $window.Tag.Motion = $true
+        Set-MonitorAmbientAnimation $window
+    }
     Click-Button $window.FindName('CloseButton')
+    Assert-True (-not $panel.Tag.Animated) 'Closed panel retained animation clocks.'
     Assert-True (-not $window.IsVisible) 'Close did not close the preview.'
     Assert-True (-not $window.Tag.Ambient) 'Closed window retained ambient animation.'
     Assert-True ($window.OwnedWindows.Count -eq 0 -and $window.Tag.Panels.Count -eq 0) 'Closing the ghost left orphan panels.'

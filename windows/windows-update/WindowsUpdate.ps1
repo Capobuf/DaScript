@@ -2070,36 +2070,61 @@ function Set-MonitorPanel {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Width="640" SizeToContent="Height" WindowStyle="None" ResizeMode="NoResize"
-        ShowInTaskbar="False" WindowStartupLocation="CenterOwner" Background="#B5A477"
-        Foreground="#FFF1BC" FontFamily="Consolas" FontSize="14" UseLayoutRounding="True">
-  <Border Background="#B5A477" BorderBrush="#111827" BorderThickness="1">
-    <Border BorderBrush="#F7E5AE" BorderThickness="2,2,0,0">
-      <Border BorderBrush="#574B30" BorderThickness="0,0,2,2" Padding="3">
+        ShowInTaskbar="False" WindowStartupLocation="CenterOwner" Background="#090E14"
+        Foreground="#FFF1BC" FontFamily="Lucida Console, Consolas" FontSize="14" UseLayoutRounding="True">
+  <Window.Resources>
+    <Storyboard x:Key="PanelTerminal">
+      <DoubleAnimation Storyboard.TargetName="PanelScanOffset" Storyboard.TargetProperty="Y" From="-0.15" To="1.1" Duration="0:0:7" RepeatBehavior="Forever"/>
+      <DoubleAnimation Storyboard.TargetName="PanelTextureOffset" Storyboard.TargetProperty="Y" From="0" To="4" Duration="0:0:1" RepeatBehavior="Forever"/>
+      <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PanelCursor" Storyboard.TargetProperty="Opacity" Duration="0:0:1.2" RepeatBehavior="Forever">
+        <DiscreteDoubleKeyFrame KeyTime="0" Value="1"/><DiscreteDoubleKeyFrame KeyTime="0:0:0.6" Value="0.2"/>
+      </DoubleAnimationUsingKeyFrames>
+    </Storyboard>
+  </Window.Resources>
+  <Border BorderBrush="#B79B51" BorderThickness="1" Padding="4">
+    <Border BorderBrush="#3D4031" BorderThickness="1" Padding="6">
+      <Grid ClipToBounds="True">
+        <Grid.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#111B24" Offset="0"/><GradientStop Color="#090E14" Offset="0.6"/><GradientStop Color="#24251B" Offset="1"/></LinearGradientBrush></Grid.Background>
+        <Path x:Name="PanelGhost" Fill="#D3B363" Opacity="0.09" Width="340" Height="280" Stretch="Uniform" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-90,-50" IsHitTestVisible="False"/>
+        <Rectangle IsHitTestVisible="False" Opacity="0.09">
+          <Rectangle.Fill><DrawingBrush TileMode="Tile" Viewport="0,0,4,4" ViewportUnits="Absolute" Viewbox="0,0,4,4" ViewboxUnits="Absolute">
+            <DrawingBrush.Transform><TranslateTransform x:Name="PanelTextureOffset"/></DrawingBrush.Transform>
+            <DrawingBrush.Drawing><GeometryDrawing Brush="#CFB575" Geometry="M0,0 H4 V1 H0 Z"/></DrawingBrush.Drawing>
+          </DrawingBrush></Rectangle.Fill>
+        </Rectangle>
+        <Rectangle x:Name="PanelSweep" IsHitTestVisible="False" Visibility="Collapsed"><Rectangle.Fill>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#00D9BD79" Offset="0"/><GradientStop Color="#18D9BD79" Offset="0.06"/><GradientStop Color="#00D9BD79" Offset="0.12"/>
+            <LinearGradientBrush.RelativeTransform><TranslateTransform x:Name="PanelScanOffset" Y="-0.15"/></LinearGradientBrush.RelativeTransform>
+          </LinearGradientBrush>
+        </Rectangle.Fill></Rectangle>
         <Grid>
-          <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/><RowDefinition Height="24"/></Grid.RowDefinitions>
-          <Grid x:Name="TitleBar" Background="#252B36">
-            <TextBlock x:Name="Caption" VerticalAlignment="Center" FontWeight="Bold" Margin="8,0,38,0"/>
-            <Button x:Name="PanelClose" Content="X" Width="24" Height="22" Margin="0,0,4,0" HorizontalAlignment="Right"
-                    Background="#B5A477" Foreground="#111827" FontWeight="Bold" ToolTip="Chiudi" AutomationProperties.Name="Chiudi finestra">
+          <Grid.RowDefinitions><RowDefinition Height="70"/><RowDefinition Height="Auto"/><RowDefinition Height="30"/></Grid.RowDefinitions>
+          <Grid x:Name="TitleBar" Background="#B3090E14">
+            <StackPanel Margin="12,8,60,6">
+              <TextBlock Text="DASCRIPT : UPDATE /&gt;" FontSize="11" Foreground="#B19E6B" Margin="0,0,0,8"/>
+              <Path x:Name="Caption" Fill="#FFF1BC" Height="24" Stretch="Uniform" HorizontalAlignment="Left" AutomationProperties.Name="Dettagli"/>
+            </StackPanel>
+            <Button x:Name="PanelClose" Content="[X]" Width="42" Height="30" Margin="0,0,8,0" HorizontalAlignment="Right"
+                    Background="Transparent" Foreground="#FFF1BC" FontWeight="Bold" ToolTip="Chiudi" AutomationProperties.Name="Chiudi finestra">
               <Button.Template><ControlTemplate TargetType="Button">
-                <Border x:Name="Edge" Background="{TemplateBinding Background}" BorderBrush="#F7E5AE" BorderThickness="2,2,0,0">
-                  <Border x:Name="Inset" BorderBrush="#574B30" BorderThickness="0,0,2,2"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-                </Border>
+                <Border Background="{TemplateBinding Background}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
                 <ControlTemplate.Triggers>
-                  <Trigger Property="IsPressed" Value="True"><Setter TargetName="Edge" Property="BorderBrush" Value="#574B30"/><Setter TargetName="Inset" Property="BorderBrush" Value="#F7E5AE"/></Trigger>
-                  <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Foreground" Value="#8C251F"/></Trigger>
+                  <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#FF9987"/></Trigger>
+                  <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Foreground" Value="#FF9987"/></Trigger>
                 </ControlTemplate.Triggers>
               </ControlTemplate></Button.Template>
             </Button>
           </Grid>
-          <Border Grid.Row="1" Margin="0,4,0,4" BorderBrush="#574B30" BorderThickness="2,2,0,0">
-            <Border BorderBrush="#F7E5AE" BorderThickness="0,0,2,2" Background="#111827"><ScrollViewer x:Name="PanelScroll" VerticalScrollBarVisibility="Auto"><ContentControl x:Name="PanelBody"/></ScrollViewer></Border>
+          <Border Grid.Row="1" BorderBrush="#6E5C2A" BorderThickness="0,1" Padding="0,6">
+            <ScrollViewer x:Name="PanelScroll" VerticalScrollBarVisibility="Auto"><ContentControl x:Name="PanelBody"/></ScrollViewer>
           </Border>
-          <Border Grid.Row="2" BorderBrush="#574B30" BorderThickness="1" Padding="6,2">
-            <TextBlock Text="DaScript  /  UPDATE" Foreground="#24251F" FontSize="12"/>
-          </Border>
+          <StackPanel Grid.Row="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0">
+            <TextBlock Text="&gt; ESC : CHIUDI   [+] : ESPANDI " Foreground="#C5B383" FontSize="11"/>
+            <Rectangle x:Name="PanelCursor" Width="7" Height="12" Fill="#E5C56C" Margin="4,0"/>
+          </StackPanel>
         </Grid>
-      </Border>
+      </Grid>
     </Border>
   </Border>
 </Window>
@@ -2110,14 +2135,18 @@ function Set-MonitorPanel {
     $panel.Owner = $Window
     $panel.Icon = $Window.Icon
     $panel.Title = 'Update - Dettagli'
-    $panel.FindName('Caption').Text = 'UPDATE // DETTAGLI'
+    $panel.FindName('Caption').Data = Get-MonitorPixelTitle 'DETTAGLI' -Distressed
+    $panel.FindName('PanelGhost').Data = $Window.FindName('LogoPath').Data
     $panel.Width = [Math]::Min($panel.Width, [Windows.SystemParameters]::WorkArea.Width)
     $panel.MaxHeight = [Windows.SystemParameters]::WorkArea.Height
-    $panel.FindName('PanelScroll').MaxHeight = [Math]::Max(100, [Math]::Min(580, $panel.MaxHeight-80))
+    $panel.FindName('PanelScroll').MaxHeight = [Math]::Max(100, [Math]::Min(540, $panel.MaxHeight-136))
     # The content keeps its original namescope, so live telemetry updates both windows.
-    $panel.Resources = $Window.Resources
+    $panel.Resources.MergedDictionaries.Add($Window.Resources)
     $panel.FindName('PanelBody').Content = $Window.Tag.PanelContent
-    $panel.Tag = [pscustomobject]@{ Monitor=$Window }
+    $panel.Tag = [pscustomobject]@{ Monitor=$Window; Animated=$false }
+    $panel.add_Loaded({ param($sender, $eventArgs) Set-MonitorPanelAnimation $sender })
+    $panel.add_StateChanged({ param($sender, $eventArgs) Set-MonitorPanelAnimation $sender })
+    $panel.add_IsVisibleChanged({ param($sender, $eventArgs) Set-MonitorPanelAnimation $sender })
     $panel.FindName('TitleBar').add_MouseLeftButtonDown({ param($sender, $eventArgs)
         if ($eventArgs.LeftButton -eq 'Pressed') { [Windows.Window]::GetWindow($sender).DragMove(); $eventArgs.Handled = $true }
     })
@@ -2126,6 +2155,7 @@ function Set-MonitorPanel {
         if ($eventArgs.Key -eq 'Escape') { $sender.Close(); $eventArgs.Handled = $true }
     })
     $panel.add_Closed({ param($sender, $eventArgs)
+        Set-MonitorPanelAnimation $sender -Stop
         $owner = $sender.Tag.Monitor
         $sender.FindName('PanelBody').Content = $null
         $owner.Tag.Panels.Remove('Details')
@@ -2135,6 +2165,20 @@ function Set-MonitorPanel {
     $Window.Tag.Panels['Details'] = $panel
     $panel.Show()
     Set-MonitorScene $Window
+}
+
+function Set-MonitorPanelAnimation {
+    param([object]$Panel, [switch]$Stop)
+    $owner = $Panel.Tag.Monitor
+    $enabled = -not $Stop -and $Panel.IsLoaded -and $Panel.IsVisible -and $Panel.WindowState -ne 'Minimized' -and
+        $owner.WindowState -ne 'Minimized' -and -not $owner.Tag.Closing -and $owner.Tag.Motion -and
+        $null -eq $owner.Tag.WindowPlacement -and [Windows.SystemParameters]::ClientAreaAnimation -and
+        -not [Windows.SystemParameters]::HighContrast -and ([Windows.Media.RenderCapability]::Tier -shr 16) -gt 0
+    if ([bool]$enabled -eq $Panel.Tag.Animated) { return }
+    if ($enabled) { $Panel.Resources['PanelTerminal'].Begin($Panel, $true) }
+    else { $Panel.Resources['PanelTerminal'].Remove($Panel) }
+    $Panel.FindName('PanelSweep').Visibility = $(if ($enabled) { 'Visible' } else { 'Collapsed' })
+    $Panel.Tag.Animated = [bool]$enabled
 }
 
 function Update-MonitorFloat {
@@ -2283,6 +2327,9 @@ function New-MonitorWindow {
                         Content="{TemplateBinding Header}" HorizontalAlignment="Center" Foreground="{TemplateBinding Foreground}" Cursor="Hand"
                         FocusVisualStyle="{x:Null}"
                         AutomationProperties.Name="{Binding Header, RelativeSource={RelativeSource TemplatedParent}}">
+            <ToggleButton.ContentTemplate><DataTemplate>
+              <Viewbox Height="14" Stretch="Uniform"><Path Data="{Binding Tag, RelativeSource={RelativeSource AncestorType=Expander}}" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Expander}}"/></Viewbox>
+            </DataTemplate></ToggleButton.ContentTemplate>
             <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
               <!-- Nonzero alpha keeps native layered-window hit testing inside the header padding. -->
               <Border x:Name="FocusFrame" BorderThickness="1" BorderBrush="#01000000" Background="#01000000" Padding="12,5">
@@ -2518,13 +2565,13 @@ function New-MonitorWindow {
         </Viewbox>
         <StackPanel Grid.Row="2" Width="600" HorizontalAlignment="Center">
           <ContentControl x:Name="DetailsHost" Visibility="Collapsed">
-          <StackPanel>
+          <StackPanel TextElement.FontFamily="Lucida Console, Consolas">
             <TextBox x:Name="ResultDetails" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto"
-                     Foreground="#FFF1BC" Background="#111827" BorderThickness="0" Padding="16,12" FontSize="14" AutomationProperties.Name="Errori, esclusioni e installazioni"/>
+                     Foreground="#FFF1BC" Background="#B3090E14" BorderThickness="0" Padding="16,12" FontSize="14" AutomationProperties.Name="Errori, esclusioni e installazioni"/>
             <Border Height="1" Background="{StaticResource Rule}" Margin="16,0"/>
           <Expander x:Name="ActivityLog" Header="ACTIVITY" IsExpanded="False" Foreground="{StaticResource IconInk}" FontSize="16" ToolTip="Apri il log: ultime 60 righe">
             <Grid>
-              <Border x:Name="ActivityPanel" Background="{DynamicResource SceneSurface}" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="240" Margin="0">
+              <Border x:Name="ActivityPanel" Background="#B3090E14" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="240" Margin="0">
             <TextBox x:Name="LogText" MinHeight="110" Background="Transparent" Foreground="#D9C58D" BorderThickness="0" Padding="0"
                    FontSize="14" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
                    HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Activity log and summary" SelectionBrush="#8D783B"/>
@@ -2534,7 +2581,7 @@ function New-MonitorWindow {
           </Expander>
           <Expander x:Name="Diagnostics" Header="DIAGNOSTICS" IsExpanded="False" Foreground="{StaticResource IconInk}" FontSize="16">
             <Grid>
-              <Border x:Name="DiagnosticsPanel" Background="{DynamicResource SceneSurface}" Padding="16,10">
+              <Border x:Name="DiagnosticsPanel" Background="#B3090E14" Padding="16,10">
                 <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
                   <StackPanel>
                     <WrapPanel  HorizontalAlignment="Center" TextElement.FontSize="10" Margin="0,2,0,4">
@@ -2648,6 +2695,9 @@ function New-MonitorWindow {
     }
     $window.Tag.PanelContent = $window.FindName('DetailsHost').Content
     $window.FindName('DetailsHost').Content = $null
+    foreach ($name in @('ActivityLog','Diagnostics')) {
+        $window.FindName($name).Tag = Get-MonitorPixelTitle $window.FindName($name).Header -Distressed
+    }
     $window.FindName('LogoHost').Tag = [pscustomobject]@{ Index=0L; Random=[Random]::new() }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
     Set-MonitorUpdateTitle $window 'UPDATE --'
@@ -2862,6 +2912,7 @@ function Get-MonitorPixelTitle {
         R='11110/10001/10001/11110/10100/10010/10001'; S='01111/10000/10000/01110/00001/00001/11110'
         T='11111/00100/00100/00100/00100/00100/00100'; U='10001/10001/10001/10001/10001/10001/01110'
         V='10001/10001/10001/10001/10001/01010/00100'; Z='11111/00001/00010/00100/01000/10000/11111'
+        Y='10001/10001/01010/00100/00100/00100/00100'
         '0'='01110/10001/10011/10101/11001/10001/01110'; '1'='00100/01100/00100/00100/00100/00100/01110'
         '2'='01110/10001/00001/00010/00100/01000/11111'; '3'='11110/00001/00001/01110/00001/00001/11110'
         '4'='00010/00110/01010/10010/11111/00010/00010'; '5'='11111/10000/10000/11110/00001/00001/11110'
@@ -2903,6 +2954,7 @@ function Set-MonitorUpdateTitle {
 function Set-MonitorAmbientAnimation {
     param([object]$Window, [switch]$Stop)
     Set-MonitorFloatAnimation $Window -Stop:$Stop
+    foreach ($panel in $Window.Tag.Panels.Values) { Set-MonitorPanelAnimation $panel -Stop:$Stop }
     $enabled = -not $Stop -and -not $Window.Tag.Outcome -and -not $Window.Tag.ShowLog -and
         $Window.IsLoaded -and -not $Window.Tag.Closing -and $Window.WindowState -ne 'Minimized' -and
         $null -eq $Window.Tag.Storyboard -and $null -eq $Window.Tag.WindowPlacement -and
@@ -3190,10 +3242,10 @@ function Update-MonitorDetails {
         @{ Label='INSTALLATI'; Items=@($State.Installed); Reason=$false }
     )
     foreach ($group in $groups) {
-        $lines.Add("$($group.Label) ($($group.Items.Count))")
+        $lines.Add("--- $($group.Label) ($($group.Items.Count)) ---")
         foreach ($item in $group.Items) {
-            $lines.Add('  ' + [string]$item.Title)
-            if ($group.Reason) { $lines.Add('  ' + [string]$item.Reason) }
+            $lines.Add('> ' + [string]$item.Title)
+            if ($group.Reason) { $lines.Add('  : ' + [string]$item.Reason) }
         }
         $lines.Add('')
     }
