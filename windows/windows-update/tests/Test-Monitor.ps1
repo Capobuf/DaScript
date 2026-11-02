@@ -96,7 +96,7 @@ function Test-MonitorTransitions {
     Update-MonitorView $Window $Snapshot
     Assert-True ($Window.Tag.Outcome -eq 'Stopped') 'Confirmed cancellation was lost.'
     $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
-    Assert-True ($Window.Tag.ShowLog -and $Window.FindName('OperationalView').Visibility -eq 'Visible') 'Final log action did not open the existing log.'
+    Assert-True ($Window.Tag.ShowLog -and $Window.FindName('OutcomeView').Visibility -eq 'Visible') 'Details action hid the outcome.'
     $Window.FindName('ResultLogButton').RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
     Assert-True (-not $Window.Tag.ShowLog -and $Window.FindName('OutcomeView').Visibility -eq 'Visible') 'Cannot return from log to result.'
 

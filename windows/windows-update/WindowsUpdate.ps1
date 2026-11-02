@@ -2056,13 +2056,16 @@ S3VDx2emsWDb/LVs652azK1+3MNWPcPeQWtyh84pxBtgwdpysHckl9R9zdE9sVbb+gZj6H/L/wFZ
 }
 
 function Set-MonitorPanel {
-    param([object]$Window, [string]$Name)
-    $expander = $Window.FindName($Name)
-    if (-not $expander.IsExpanded) {
-        if ($Window.Tag.Panels.ContainsKey($Name)) { $Window.Tag.Panels[$Name].Close() }
+    param([object]$Window, [switch]$Close)
+    if ($Close) {
+        if ($Window.Tag.Panels.ContainsKey('Details')) { $Window.Tag.Panels['Details'].Close() }
+        $Window.Tag.ShowLog = $false
         return
     }
-    if ($Window.Tag.Closing -or $Window.Tag.Panels.ContainsKey($Name)) { return }
+    if ($Window.Tag.Closing) { return }
+    $Window.Tag.ShowLog = $true
+    if (-not $Window.IsLoaded) { return }
+    if ($Window.Tag.Panels.ContainsKey('Details')) { [void]$Window.Tag.Panels['Details'].Activate(); return }
     [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -2090,7 +2093,7 @@ function Set-MonitorPanel {
             </Button>
           </Grid>
           <Border Grid.Row="1" Margin="0,4,0,4" BorderBrush="#574B30" BorderThickness="2,2,0,0">
-            <Border BorderBrush="#F7E5AE" BorderThickness="0,0,2,2" Background="#111827"><ContentControl x:Name="PanelBody"/></Border>
+            <Border BorderBrush="#F7E5AE" BorderThickness="0,0,2,2" Background="#111827"><ScrollViewer x:Name="PanelScroll" VerticalScrollBarVisibility="Auto"><ContentControl x:Name="PanelBody"/></ScrollViewer></Border>
           </Border>
           <Border Grid.Row="2" BorderBrush="#574B30" BorderThickness="1" Padding="6,2">
             <TextBlock Text="DaScript  /  UPDATE" Foreground="#24251F" FontSize="12"/>
@@ -2106,14 +2109,15 @@ function Set-MonitorPanel {
     finally { $reader.Dispose() }
     $panel.Owner = $Window
     $panel.Icon = $Window.Icon
-    $panel.Title = 'Update - ' + $expander.Header
-    $panel.FindName('Caption').Text = '[+] ' + $expander.Header
+    $panel.Title = 'Update - Dettagli'
+    $panel.FindName('Caption').Text = 'UPDATE // DETTAGLI'
     $panel.Width = [Math]::Min($panel.Width, [Windows.SystemParameters]::WorkArea.Width)
     $panel.MaxHeight = [Windows.SystemParameters]::WorkArea.Height
+    $panel.FindName('PanelScroll').MaxHeight = [Math]::Max(100, [Math]::Min(580, $panel.MaxHeight-80))
     # The content keeps its original namescope, so live telemetry updates both windows.
     $panel.Resources = $Window.Resources
-    $panel.FindName('PanelBody').Content = $Window.Tag.PanelContent[$Name]
-    $panel.Tag = [pscustomobject]@{ Monitor=$Window; PanelName=$Name }
+    $panel.FindName('PanelBody').Content = $Window.Tag.PanelContent
+    $panel.Tag = [pscustomobject]@{ Monitor=$Window }
     $panel.FindName('TitleBar').add_MouseLeftButtonDown({ param($sender, $eventArgs)
         if ($eventArgs.LeftButton -eq 'Pressed') { [Windows.Window]::GetWindow($sender).DragMove(); $eventArgs.Handled = $true }
     })
@@ -2123,13 +2127,14 @@ function Set-MonitorPanel {
     })
     $panel.add_Closed({ param($sender, $eventArgs)
         $owner = $sender.Tag.Monitor
-        $name = $sender.Tag.PanelName
         $sender.FindName('PanelBody').Content = $null
-        $owner.Tag.Panels.Remove($name)
-        $owner.FindName($name).IsExpanded = $false
+        $owner.Tag.Panels.Remove('Details')
+        $owner.Tag.ShowLog = $false
+        if (-not $owner.Tag.Closing) { Set-MonitorScene $owner }
     })
-    $Window.Tag.Panels[$Name] = $panel
+    $Window.Tag.Panels['Details'] = $panel
     $panel.Show()
+    Set-MonitorScene $Window
 }
 
 function Update-MonitorFloat {
@@ -2316,6 +2321,17 @@ function New-MonitorWindow {
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="TitleLink" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="ToolTip" Value="Apri dettagli, errori, esclusioni e log"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+        <Border Background="#01000000"><ContentPresenter/></Border>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Opacity" Value="0.85"/></Trigger>
+          <Trigger Property="IsMouseOver" Value="True"><Setter Property="Opacity" Value="0.95"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate></Setter.Value></Setter>
+    </Style>
     <SolidColorBrush x:Key="IconInk" Color="#FFF1BC"/>
     <Geometry x:Key="InstalledIcon">F1 M10,1 H12 V2 H10 Z M9,2 H12 V3 H9 Z M8,3 H11 V4 H8 Z M0,4 H2 V5 H0 Z M7,4 H10 V5 H7 Z M0,5 H3 V6 H0 Z M6,5 H9 V6 H6 Z M1,6 H4 V7 H1 Z M5,6 H8 V7 H5 Z M2,7 H7 V8 H2 Z M3,8 H6 V9 H3 Z M4,9 H5 V10 H4 Z</Geometry>
     <Geometry x:Key="FailureIcon">F1 M5,0 H7 V1 H5 Z M4,1 H8 V2 H4 Z M3,2 H5 V3 H3 Z M7,2 H9 V3 H7 Z M3,3 H5 V4 H3 Z M7,3 H9 V4 H7 Z M2,4 H4 V5 H2 Z M8,4 H10 V5 H8 Z M2,5 H4 V6 H2 Z M5,5 H7 V6 H5 Z M8,5 H10 V6 H8 Z M1,6 H3 V7 H1 Z M5,6 H7 V7 H5 Z M9,6 H11 V7 H9 Z M1,7 H3 V8 H1 Z M5,7 H7 V8 H5 Z M9,7 H11 V8 H9 Z M0,8 H2 V9 H0 Z M10,8 H12 V9 H10 Z M0,9 H2 V10 H0 Z M5,9 H7 V10 H5 Z M10,9 H12 V10 H10 Z M0,10 H12 V11 H0 Z M0,11 H12 V12 H0 Z</Geometry>
@@ -2406,8 +2422,6 @@ function New-MonitorWindow {
             <StackPanel x:Name="ChromeControls" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,36,0,0" Background="{DynamicResource SceneSurface}">
               <Button x:Name="MinimizeButton" Content="Riduci a icona" Style="{StaticResource IconButton}" Tag="{StaticResource MinimizeIcon}" ToolTip="Riduci a icona"/>
         <WrapPanel x:Name="FooterActions" Margin="0" VerticalAlignment="Center" HorizontalAlignment="Center">
-          <Button x:Name="StopButton" Style="{StaticResource IconButton}" Tag="{StaticResource StopIcon}" Content="_STOP" IsEnabled="False" ToolTip="Alt+S: cooperative stop; the current installation may finish before updates stop."/>
-          <Button x:Name="ResultLogButton" Style="{StaticResource IconButton}" Tag="{StaticResource LogIcon}" ToolTip="{Binding Content, RelativeSource={RelativeSource Self}}" Content="Visualizza _log" Visibility="Collapsed" Margin="0"/>
           <Button x:Name="CloseButton" Style="{StaticResource IconButton}" Tag="{StaticResource CloseIcon}" Content="_Chiudi" ToolTip="Alt+C: chiude la finestra; il lavoro attivo continua in background."/>
         </WrapPanel>
             </StackPanel>
@@ -2416,6 +2430,7 @@ function New-MonitorWindow {
                 <Grid>
                   <StackPanel x:Name="OperationalView">
 
+                    <Button x:Name="ResultLogButton" Style="{StaticResource TitleLink}" AutomationProperties.Name="Apri dettagli aggiornamenti">
                     <ContentControl x:Name="UpdateProgressText" Margin="0,0,0,4" Focusable="False"
                                     AutomationProperties.Name="{Binding Content, RelativeSource={RelativeSource Self}}">
                       <ContentControl.Template><ControlTemplate TargetType="ContentControl">
@@ -2427,6 +2442,7 @@ function New-MonitorWindow {
                         </Viewbox>
                       </ControlTemplate></ContentControl.Template>
                     </ContentControl>
+                    </Button>
 
 
             <Grid Height="10" Width="370" HorizontalAlignment="Center" Margin="0,8,0,8">
@@ -2458,17 +2474,19 @@ function New-MonitorWindow {
             </WrapPanel>
                   </StackPanel>
                   <ScrollViewer x:Name="OutcomeView"  Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="6" VerticalAlignment="Center">
+        <StackPanel VerticalAlignment="Top">
           <Path x:Name="OutcomeGhost" Data="{Binding Data, ElementName=LogoPath}" Fill="#9DE6ED" Visibility="Collapsed" Height="160" Stretch="Uniform" RenderTransformOrigin="0.5,0.5" Margin="0,0,0,24">
             <Path.CacheMode><BitmapCache RenderAtScale="2"/></Path.CacheMode>
           </Path>
           <StackPanel x:Name="OutcomeMessage" Effect="{StaticResource LetterContrast}">
-            <Viewbox Stretch="Uniform" Height="70" Margin="0,0,0,10">
+            <Button x:Name="OutcomeDetailsButton" Style="{StaticResource TitleLink}" AutomationProperties.Name="Apri dettagli esito">
+            <Viewbox Stretch="Uniform" Height="96" Margin="0,0,0,4">
               <Grid Margin="2">
                 <Path Data="{Binding Data, ElementName=OutcomeTitle}" Stroke="#0B1019" StrokeThickness="3"/>
                 <Path x:Name="OutcomeTitle" Fill="#9DE6ED"/>
               </Grid>
             </Viewbox>
+            </Button>
             <TextBlock x:Name="OutcomeDescription" TextAlignment="Center" TextWrapping="Wrap" FontSize="18" Foreground="#FFF1BC" Background="#111827" Padding="6,3" HorizontalAlignment="Center"/>
             <TextBlock x:Name="OutcomeCounts" TextAlignment="Center" TextWrapping="Wrap" FontSize="16" Foreground="#EDF1FA" Background="#111827" Padding="6,2" HorizontalAlignment="Center" Margin="0,6,0,0"/>
             <TextBox x:Name="OutcomeDetail" Visibility="Collapsed" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="76" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"
@@ -2499,6 +2517,11 @@ function New-MonitorWindow {
           </Grid>
         </Viewbox>
         <StackPanel Grid.Row="2" Width="600" HorizontalAlignment="Center">
+          <ContentControl x:Name="DetailsHost" Visibility="Collapsed">
+          <StackPanel>
+            <TextBox x:Name="ResultDetails" IsReadOnly="True" TextWrapping="Wrap" MaxHeight="200" VerticalScrollBarVisibility="Auto"
+                     Foreground="#FFF1BC" Background="#111827" BorderThickness="0" Padding="16,12" FontSize="14" AutomationProperties.Name="Errori, esclusioni e installazioni"/>
+            <Border Height="1" Background="{StaticResource Rule}" Margin="16,0"/>
           <Expander x:Name="ActivityLog" Header="ACTIVITY" IsExpanded="False" Foreground="{StaticResource IconInk}" FontSize="16" ToolTip="Apri il log: ultime 60 righe">
             <Grid>
               <Border x:Name="ActivityPanel" Background="{DynamicResource SceneSurface}" Padding="16,10"><Grid x:Name="TerminalField" ClipToBounds="True" Height="240" Margin="0">
@@ -2548,6 +2571,10 @@ function New-MonitorWindow {
               </Border>
             </Grid>
           </Expander>
+          <Button x:Name="StopButton" Content="_STOP AGGIORNAMENTI" IsEnabled="False" HorizontalAlignment="Center" Margin="12" Padding="12,6" BorderThickness="1"
+                  ToolTip="Richiede l'arresto cooperativo; l'installazione in corso potrebbe dover terminare."/>
+          </StackPanel>
+          </ContentControl>
           <StackPanel x:Name="PreviewControls" Visibility="Collapsed" Margin="0,0,0,8" Background="{DynamicResource SceneSurface}">
         <TextBlock Text="DaScript / ANTEPRIMA UI / Dati dimostrativi, nessun aggiornamento o riavvio" TextWrapping="Wrap" TextAlignment="Center" FontSize="11" Margin="0,0,0,6"/>
         <WrapPanel HorizontalAlignment="Center">
@@ -2590,14 +2617,6 @@ function New-MonitorWindow {
             $eventArgs.Handled = $true
         }
     })
-    foreach ($name in @('ActivityLog','Diagnostics')) {
-        $togglePanel = { param($sender, $eventArgs)
-            $target = [Windows.Window]::GetWindow($sender)
-            if ($null -ne $target -and $target.IsLoaded) { Set-MonitorPanel $target $sender.Name }
-        }
-        $window.FindName($name).add_Expanded($togglePanel)
-        $window.FindName($name).add_Collapsed($togglePanel)
-    }
     $window.FindName('MinimizeButton').add_Click({ param($sender, $eventArgs)
         [Windows.SystemCommands]::MinimizeWindow([Windows.Window]::GetWindow($sender))
     })
@@ -2624,23 +2643,21 @@ function New-MonitorWindow {
         AlternateColor=[Windows.Media.Colors]::White
         WindowPlacement=$null; Closing=$false; ChangingPlacement=$false
         SceneBackground=$window.Resources['SceneSurface'].Clone()
-        Panels=@{}; PanelContent=@{}
+        Panels=@{}; PanelContent=$null
         Float=[pscustomobject]@{ Timer=$null; Clock=[Diagnostics.Stopwatch]::new(); Phase=0.0; Speed=0.0; Dragging=$false }
     }
-    foreach ($name in @('ActivityLog','Diagnostics')) {
-        $window.Tag.PanelContent[$name] = $window.FindName($name).Content
-        $window.FindName($name).Content = $null
-    }
+    $window.Tag.PanelContent = $window.FindName('DetailsHost').Content
+    $window.FindName('DetailsHost').Content = $null
     $window.FindName('LogoHost').Tag = [pscustomobject]@{ Index=0L; Random=[Random]::new() }
     $window.FindName('LogText').Tag = [pscustomobject]@{ Target=''; Lines=@(); Visible=0 }
     Set-MonitorUpdateTitle $window 'UPDATE --'
-    $window.FindName('ResultLogButton').add_Click({ param($sender, $eventArgs)
+    $openDetails = { param($sender, $eventArgs)
         $target = [Windows.Window]::GetWindow($sender)
         Stop-MonitorTransition $target
-        $target.Tag.ShowLog = -not $target.Tag.ShowLog
-        if ($target.Tag.ShowLog) { $target.FindName('ActivityLog').IsExpanded = $true }
-        Set-MonitorScene $target
-    })
+        Set-MonitorPanel $target -Close:$target.Tag.ShowLog
+    }
+    $window.FindName('ResultLogButton').add_Click($openDetails)
+    $window.FindName('OutcomeDetailsButton').add_Click($openDetails)
     $window.add_Loaded({ param($sender, $eventArgs)
         if (-not $sender.Tag.Intro) {
             $sender.Tag.Intro = $true
@@ -2648,7 +2665,7 @@ function New-MonitorWindow {
         }
         Set-MonitorOutcomePulse $sender
         Set-MonitorAmbientAnimation $sender
-        foreach ($name in @('ActivityLog','Diagnostics')) { Set-MonitorPanel $sender $name }
+        if ($sender.Tag.ShowLog) { Set-MonitorPanel $sender }
     })
     $window.add_StateChanged({ param($sender, $eventArgs)
         if (-not $sender.Tag.ChangingPlacement -and
@@ -2923,7 +2940,7 @@ function Set-MonitorOutcomePulse {
 function Set-MonitorScene {
     param([object]$Window)
     $result = [bool]$Window.Tag.Outcome
-    $showResult = $result -and -not $Window.Tag.ShowLog
+    $showResult = $result
     $Window.FindName('OperationalView').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
     $Window.FindName('OutcomeView').Visibility = $(if ($showResult) { 'Visible' } else { 'Collapsed' })
     $Window.FindName('AmbientField').Visibility = 'Visible'
@@ -2931,8 +2948,6 @@ function Set-MonitorScene {
     $Window.FindName('GhostBackplate').Fill = $Window.Tag.SceneBackground
     $Window.FindName('ChromeControls').Background = $Window.Tag.SceneBackground
     $Window.FindName('LogoPath').Fill = $(if ($result) { $Window.FindName('OutcomeTitle').Fill } else { $Window.Resources['Accent'] })
-    $Window.FindName('ResultLogButton').Visibility = $(if ($result) { 'Visible' } else { 'Collapsed' })
-    $Window.FindName('ResultLogButton').Content = $(if ($Window.Tag.ShowLog) { 'Torna all''_esito' } else { 'Visualizza _log' })
     $Window.FindName('StopButton').Visibility = $(if ($result -and $Window.Tag.Outcome -ne 'Reboot') { 'Collapsed' } else { 'Visible' })
     $Window.FindName('NoticeText').Visibility = $(if ($showResult) { 'Collapsed' } else { 'Visible' })
     $ink = if ($result) { [Windows.Media.SolidColorBrush]::new($Window.FindName('OutcomeTitle').Fill.GetAnimationBaseValue([Windows.Media.SolidColorBrush]::ColorProperty)) } else { $Window.Resources['IconInk'] }
@@ -2952,7 +2967,6 @@ function Update-MonitorOutcome {
     if ($changed) {
         Set-MonitorOutcomePulse $Window -Stop
         $Window.Tag.Outcome = $kind
-        $Window.Tag.ShowLog = $false
     }
     if ($null -ne $outcome) {
         if ($changed) {
@@ -3165,6 +3179,29 @@ function Update-MonitorTelemetry {
     Update-MonitorTitle $Window $Snapshot
 }
 
+function Update-MonitorDetails {
+    param([object]$Window, [object]$State)
+    $lines = [Collections.Generic.List[string]]::new()
+    if ($State.Message) { $lines.Add([string]$State.Message); $lines.Add('') }
+    if ($State.CleanupError) { $lines.Add('PULIZIA INCOMPLETA: ' + $State.CleanupError); $lines.Add('') }
+    $groups = @(
+        @{ Label='ERRORI APERTI'; Items=@($State.Failures | Where-Object { -not $_.Resolved }); Reason=$true }
+        @{ Label='ESCLUSIONI'; Items=@($State.Skipped); Reason=$true }
+        @{ Label='INSTALLATI'; Items=@($State.Installed); Reason=$false }
+    )
+    foreach ($group in $groups) {
+        $lines.Add("$($group.Label) ($($group.Items.Count))")
+        foreach ($item in $group.Items) {
+            $lines.Add('  ' + [string]$item.Title)
+            if ($group.Reason) { $lines.Add('  ' + [string]$item.Reason) }
+        }
+        $lines.Add('')
+    }
+    $text = ($lines -join "`r`n").TrimEnd()
+    $box = $Window.FindName('ResultDetails')
+    if ($box.Text -cne $text) { $box.Text = $text }
+}
+
 function Update-MonitorView {
     param([object]$Window, [object]$Snapshot)
     $state = $Snapshot.State
@@ -3225,6 +3262,7 @@ function Update-MonitorView {
     $Window.FindName('StopButton').IsEnabled = -not $terminal -and -not $state.RebootCommitted -and -not $Snapshot.StopRequested
     $urgent = $terminal -or $Snapshot.StopRequested -or $state.RebootCommitted -or $state.Phase -eq 'RestartCountdown' -or $failures -gt 0 -or $state.CleanupError -or $Snapshot.Log -match '\[(ERROR|WARN|WARNING)\]'
     Update-MonitorLog $Window -Text $Snapshot.Log -AcceptSnapshot -Immediate:$urgent
+    Update-MonitorDetails $Window $state
     Update-MonitorOutcome $Window $Snapshot
 }
 
@@ -3355,7 +3393,6 @@ function New-MonitorPreviewWindow {
         if ($null -eq $sender.SelectedItem) { return }
         $target = [Windows.Window]::GetWindow($sender)
         Stop-MonitorTransition $target
-        $target.Tag.ShowLog = $false
         Update-MonitorView $target (New-MonitorPreviewSnapshot $sender.SelectedItem.Tag)
         $target.FindName('PreviewPrevious').IsEnabled = $sender.SelectedIndex -gt 0
         $target.FindName('PreviewNext').IsEnabled = $sender.SelectedIndex -lt $sender.Items.Count-1
@@ -3373,7 +3410,7 @@ function New-MonitorPreviewWindow {
     })
     $window.FindName('StopButton').ToolTip = 'Simula la richiesta di stop; scegli Interrotto per vedere la conferma.'
     $window.FindName('StopButton').add_Click({ param($sender, $eventArgs)
-        $selector = [Windows.Window]::GetWindow($sender).FindName('PreviewSelector')
+        $selector = [Windows.Window]::GetWindow($sender).Tag.Monitor.FindName('PreviewSelector')
         $selector.SelectedItem = @($selector.Items | Where-Object { $_.Tag -eq 'StopPending' })[0]
     })
     $window.FindName('CloseButton').add_Click({ param($sender, $eventArgs)
@@ -3454,16 +3491,19 @@ function Invoke-Monitor {
                 if ($view.Stopping -or $view.RequestStop) { $window.FindName('StopButton').IsEnabled = $false }
             } catch {
                 Stop-MonitorTransition $window
+                $window.Tag.Outcome = ''
                 $window.Tag.ShowLog = $true
                 Set-MonitorScene $window
                 $window.Title = 'Update - Errore monitor'
                 $window.FindName('ActivityLog').IsExpanded = $true
+                Set-MonitorPanel $window
                 $window.FindName('Activity').Tag = $null
                 $window.FindName('PhaseText').Text = 'READ / COMMAND FAILED'
                 $window.FindName('PhaseText').Foreground = $window.Resources['Error']
                 $window.FindName('StatusText').Text = 'MONITOR ERROR'
                 $window.FindName('StatusText').Foreground = $window.Resources['Error']
                 $window.FindName('NoticeText').Text = $_.Exception.Message
+                $window.FindName('ResultDetails').Text = "ERRORE MONITOR`r`n" + $_.Exception.Message
                 $window.FindName('StopButton').IsEnabled = $false
                 $window.FindName('Activity').Visibility = 'Collapsed'
                 Update-MonitorLog $window -Immediate

@@ -36,15 +36,13 @@ function Click-Expander {
     $owner.UpdateLayout()
     Assert-True ($owner.WindowState -eq 'Normal' -and $owner.IsVisible) 'Expander activation minimized or hid the window.'
 }
-function Test-HeaderHitSurface {
-    param($Window)
+function Test-TitleHitSurface {
+    param($Window, [string]$Name)
     $Window.UpdateLayout()
     $bitmap = [Windows.Media.Imaging.RenderTargetBitmap]::new([int]$Window.ActualWidth, [int]$Window.ActualHeight, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
     $bitmap.Render($Window.Content)
     $pixel = [byte[]]::new(4)
-    foreach ($name in @('ActivityLog','Diagnostics')) {
-        $expander = $Window.FindName($name)
-        $toggle = $expander.Template.FindName('HeaderToggle', $expander)
+        $toggle = $Window.FindName($Name)
         foreach ($point in @(
             [Windows.Point]::new(5, $toggle.ActualHeight/2)
             [Windows.Point]::new($toggle.ActualWidth-5, $toggle.ActualHeight/2)
@@ -53,12 +51,11 @@ function Test-HeaderHitSurface {
         )) {
             $position = $toggle.TranslatePoint($point, $Window.Content)
             $bitmap.CopyPixels([Windows.Int32Rect]::new([int]$position.X,[int]$position.Y,1,1), $pixel, 4, 0)
-            Assert-True ($pixel[3] -gt 0) "$name lets native mouse input pass through its header padding."
+            Assert-True ($pixel[3] -gt 0) "$Name lets native mouse input pass through its title."
             $hit = $Window.InputHitTest($position)
             while ($null -ne $hit -and $hit -ne $toggle) { $hit = [Windows.Media.VisualTreeHelper]::GetParent($hit) }
-            Assert-True ($hit -eq $toggle) "$name header padding routes input to a different control."
+            Assert-True ($hit -eq $toggle) "$Name title routes input to a different control."
         }
-    }
 }
 function Wait-AnimationTick {
     # Storyboard.Remove releases animated values on the next WPF timing tick.
@@ -85,7 +82,7 @@ function Test-FrameRendering {
         $bitmap.CopyPixels([Windows.Int32Rect]::new($point[0],$point[1],1,1), $pixel, 4, 0)
         Assert-True ($pixel[3] -eq 0) 'A corner outside the ghost silhouette was painted opaque.'
     }
-    foreach ($name in @('MinimizeButton','StopButton','CloseButton','Progress')) {
+    foreach ($name in @('MinimizeButton','CloseButton','Progress')) {
         $control = $Window.FindName($name)
         $center = $control.TranslatePoint([Windows.Point]::new($control.ActualWidth/2,$control.ActualHeight/2), $Window.Content)
         Assert-True ($center.X -ge 0 -and $center.X -lt $width -and $center.Y -ge 0 -and $center.Y -lt $height) "A control fell outside the ghost: $name"
@@ -99,7 +96,7 @@ try {
     $window.Tag.Motion = $false
     $window.Show()
     Test-FrameRendering $window
-    Test-HeaderHitSurface $window
+    Test-TitleHitSurface $window 'ResultLogButton'
     $selector = $window.FindName('PreviewSelector')
     Assert-True ($selector.Items.Count -eq 18 -and $selector.SelectedItem.Tag -eq 'Install') 'Preview did not start on installation.'
     Assert-True ($window.FindName('PreviewControls').Visibility -eq 'Visible') 'Preview identification is missing.'
@@ -107,27 +104,28 @@ try {
     Assert-True ($window.Title -eq 'Update - Installazione - batch 42%') 'Initial window title does not describe the current operation.'
     $activity = $window.FindName('ActivityLog')
     Assert-True (-not $activity.IsExpanded -and -not $window.FindName('Diagnostics').IsExpanded -and $window.OwnedWindows.Count -eq 0) 'Panels must start closed.'
-    [void]$activity.ApplyTemplate()
-    $toggle = $activity.Template.FindName('HeaderToggle', $activity)
-    Assert-True ($toggle.Content -eq 'ACTIVITY') 'Activity reused the Diagnostics label.'
+    Assert-True ($window.FindName('FooterActions').Children.Count -eq 1) 'An ambiguous square control remains in the hood.'
     $initialHeight = $window.ActualHeight
-    Click-Expander $activity
-    $panel = $window.Tag.Panels['ActivityLog']
-    Assert-True ($panel.IsVisible -and $panel.Owner -eq $window -and -not $panel.ShowInTaskbar -and $panel.ResizeMode -eq 'NoResize') 'Activity did not open an owned, fixed-size window.'
-    Assert-True ([Windows.Window]::GetWindow($window.FindName('LogText')) -eq $panel) 'The live log did not move to Activity.'
+    $title = $window.FindName('ResultLogButton')
+    $titleCenter = $title.TranslatePoint([Windows.Point]::new($title.ActualWidth/2,$title.ActualHeight/2), $window.FindName('Scene'))
+    Click-Button $title
+    $panel = $window.Tag.Panels['Details']
+    Assert-True ($panel.IsVisible -and $panel.Owner -eq $window -and -not $panel.ShowInTaskbar -and $panel.ResizeMode -eq 'NoResize') 'Title did not open the details panel.'
+    foreach ($name in @('LogText','DiagnosticsText','ResultDetails','StopButton')) {
+        Assert-True ([Windows.Window]::GetWindow($window.FindName($name)) -eq $panel) "$name is outside the unified panel."
+    }
     Update-MonitorLog $window -Immediate
     Assert-True ($window.FindName('LogText').Text -like '*PREVIEW*') 'Detached Activity lost its live log.'
+    Click-Expander $activity
     Click-Expander $window.FindName('Diagnostics')
-    Assert-True ($window.OwnedWindows.Count -eq 2 -and $window.Tag.Panels['Diagnostics'].IsVisible) 'Panels cannot open independently.'
+    Assert-True ($window.OwnedWindows.Count -eq 1 -and $activity.IsExpanded -and $window.FindName('Diagnostics').IsExpanded) 'Sections created extra windows.'
     Assert-True ([Math]::Abs($window.ActualHeight-$initialHeight) -lt 1) 'Opening panels resized the ghost.'
     Click-Button $panel.FindName('PanelClose')
-    Assert-True (-not $activity.IsExpanded -and -not $window.Tag.Panels.ContainsKey('ActivityLog') -and $window.FindName('Diagnostics').IsExpanded) 'Panel close did not reset only its own toggle.'
-    Click-Expander $window.FindName('Diagnostics')
-    Click-Expander $activity
-    Assert-True ($window.Tag.Panels['ActivityLog'].IsVisible -and [Windows.Window]::GetWindow($window.FindName('LogText')) -eq $window.Tag.Panels['ActivityLog']) 'Activity could not reopen the existing live content.'
-    Click-Expander $activity
+    Assert-True (-not $window.Tag.ShowLog -and $window.Tag.Panels.Count -eq 0) 'Panel close left stale open state.'
+    Click-Button $title
+    Assert-True ($window.Tag.Panels['Details'].IsVisible -and $activity.IsExpanded) 'Reopening lost the panel or section selection.'
+    Click-Button $title
     Assert-True ($window.OwnedWindows.Count -eq 0 -and $window.ActualHeight -eq $initialHeight) 'Toggle close left a panel or resized the ghost.'
-    Test-HeaderHitSurface $window
     $expected = @{NoUpdates='NoUpdates'; Completed='Completed'; Partial='Partial'; Excluded='Partial'; Error='Error'; Reboot='Reboot'; Committed='Reboot'; Stopped='Stopped'}
     for ($index=0; $index -lt $selector.Items.Count; $index++) {
         $selector.SelectedIndex = $index
@@ -141,14 +139,29 @@ try {
         if ($scene -eq 'ActiveError') { Assert-True ($window.Title -eq 'Update - Bloccato - operazione incerta') 'Uncertain operation appeared completed in the title.' }
         Assert-True ($window.FindName('StopButton').IsEnabled -eq ($scene -notin @('Committed','Stopped','StopPending','NoUpdates','Completed','Partial','Excluded','Error','ActiveError'))) "Wrong stop availability: $scene"
         if ($outcome) {
-            $activity.IsExpanded = $false
-            Click-Button $window.FindName('ResultLogButton')
-            Assert-True ($window.Tag.ShowLog -and $window.FindName('OperationalView').Visibility -eq 'Visible') "Log is inaccessible: $scene"
-            Assert-True $activity.IsExpanded "Final log remained collapsed: $scene"
-            Click-Button $window.FindName('ResultLogButton')
+            $window.UpdateLayout()
+            $outcomeButton = $window.FindName('OutcomeDetailsButton')
+            $center = $outcomeButton.TranslatePoint([Windows.Point]::new($outcomeButton.ActualWidth/2,$outcomeButton.ActualHeight/2), $window.FindName('Scene'))
+            Assert-True ([Math]::Abs($center.Y-$titleCenter.Y) -lt 1) "Outcome left the shared title position between the hands: $scene"
+            Test-TitleHitSurface $window 'OutcomeDetailsButton'
+            Click-Button $outcomeButton
+            Assert-True ($window.Tag.ShowLog -and $window.Tag.Panels['Details'].IsVisible -and $window.FindName('OutcomeView').Visibility -eq 'Visible') "Details hid the result or did not open: $scene"
+            if ($scene -eq 'Partial') { Assert-True ($window.FindName('ResultDetails').Text -like '*ERRORI APERTI (1)*HRESULT=0x80004005*') 'Partial result lost the failure reason.' }
+            if ($scene -eq 'Excluded') { Assert-True ($window.FindName('ResultDetails').Text -like '*ESCLUSIONI (1)*Driver dimostrativo*Driver excluded by operator*') 'Exclusion lost its title or reason.' }
+            Click-Button $outcomeButton
             Assert-True (-not $window.Tag.ShowLog -and $window.FindName('OutcomeView').Visibility -eq 'Visible') "Cannot return to result: $scene"
         }
     }
+    $detailSnapshot = New-MonitorPreviewSnapshot 'Partial'
+    $detailSnapshot.State.Failures += [pscustomobject]@{ Title='Resolved failure'; Reason='Do not show as open'; Resolved=$true }
+    Update-MonitorView $window $detailSnapshot
+    Click-Button $window.FindName('OutcomeDetailsButton')
+    $openPanel = $window.Tag.Panels['Details']
+    Assert-True ($window.FindName('ResultDetails').Text -notlike '*Resolved failure*' -and $window.FindName('ResultDetails').Text -like '*ERRORI APERTI (1)*') 'Resolved failures appeared as open errors.'
+    $detailSnapshot.State.Failures[0].Resolved = $true
+    Update-MonitorView $window $detailSnapshot
+    Assert-True ($window.Tag.Panels['Details'] -eq $openPanel -and $openPanel.IsVisible -and $window.FindName('ResultDetails').Text -like '*ERRORI APERTI (0)*' -and $window.FindName('ResultDetails').Text -notlike '*HRESULT*') 'Open details did not refresh after error resolution.'
+    Click-Button $window.FindName('OutcomeDetailsButton')
     $selector.SelectedIndex = 0
     Assert-True (-not $window.FindName('PreviewPrevious').IsEnabled) 'Previous enabled at first scene.'
     Click-Button $window.FindName('PreviewNext')
@@ -158,8 +171,10 @@ try {
     $selector.SelectedIndex = $selector.Items.Count-1
     Assert-True (-not $window.FindName('PreviewNext').IsEnabled) 'Next enabled at last scene.'
     $selector.SelectedIndex = 3
+    Click-Button $window.FindName('ResultLogButton')
     Click-Button $window.FindName('StopButton')
     Assert-True ($selector.SelectedItem.Tag -eq 'StopPending' -and -not $window.Tag.Outcome -and -not $window.FindName('StopButton').IsEnabled) 'Preview stop did not remain a pending request.'
+    Click-Button $window.FindName('ResultLogButton')
     $window.SizeToContent = 'Manual'
     $window.Width = 640
     $window.Height = 480
@@ -213,6 +228,7 @@ try {
         $window.Tag.Motion = $true
         Set-MonitorAmbientAnimation $window
     }
+    Click-Button $window.FindName('ResultLogButton')
     Click-Button $window.FindName('CloseButton')
     Assert-True (-not $window.IsVisible) 'Close did not close the preview.'
     Assert-True (-not $window.Tag.Ambient) 'Closed window retained ambient animation.'
